@@ -488,11 +488,9 @@ try {
   step('Codex reply rendered', codexReplied);
   const codexToolRow = await page.evaluate(() => {
     const rows = [...document.querySelectorAll('.sb-llm-msg-tool')];
-    return rows.some(
-      (row) => row.textContent.includes('command_execution') && row.textContent.includes('git status'),
-    );
+    return rows.some((row) => row.textContent.includes('Запустил команду'));
   });
-  step('Codex command execution shown in chat', codexToolRow);
+  step('Codex command shown as a service bubble', codexToolRow);
 
   await page.type('.sb-llm-input-row textarea', 'продолжи');
   await page.evaluate(() => {

@@ -23,7 +23,6 @@ export const Page: React.FC = () => {
       <main>
         <h2>Pages in Storybook</h2>
         <div className="page-actions">
-          <Button label="Home" />
           <Button primary label="Login" onClick={() => setUser({ name: 'Jane Doe' })} />
         </div>
         <p>

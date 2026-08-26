@@ -112,14 +112,13 @@ export async function runCodex(
                 handlers.onThreadId(codexEvent.thread_id);
               }
               break;
-            case 'item.completed':
-            case 'item.started': {
+            case 'item.completed': {
               const item = codexEvent.item;
               if (!item) {
                 break;
               }
               const itemType = item.type ?? '';
-              if (codexEvent.type === 'item.completed' && itemType === 'agent_message') {
+              if (itemType === 'agent_message') {
                 if (typeof item.text === 'string' && item.text) {
                   sawAgentMessage = true;
                   handlers.onText(item.text);
@@ -139,6 +138,9 @@ export async function runCodex(
                   title: item.title,
                 });
               }
+              break;
+            }
+            case 'item.started': {
               break;
             }
             case 'turn.failed':
