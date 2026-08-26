@@ -45,6 +45,14 @@
   font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
   font-size: 13px;
   line-height: 1.5;
+  /*
+   Pin the panel to the visible addon-panel area: Storybook renders the
+   panel inside a scrolling container, so a percentage height would grow
+   with the content and scroll the input row away.
+  */
+  position: absolute;
+  inset: 0;
+  height: auto;
 }
 
 @media (prefers-color-scheme: dark) {
