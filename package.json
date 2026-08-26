@@ -1,0 +1,111 @@
+{
+  "name": "storybook-addon-llm",
+  "version": "0.1.0",
+  "description": "Chat with any OpenAI-compatible LLM inside Storybook. Pick elements of the open story and add them to the chat context.",
+  "keywords": [
+    "storybook-addon",
+    "llm",
+    "ai",
+    "chat",
+    "openai",
+    "deepseek"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dvaletin/storybook-addon-llm"
+  },
+  "license": "MIT",
+  "author": "dvaletin",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./preview": {
+      "types": "./dist/preview.d.ts",
+      "default": "./dist/preview.js"
+    },
+    "./manager": "./dist/manager.js",
+    "./package.json": "./package.json",
+    "./preset": "./dist/preset.js"
+  },
+  "files": [
+    "dist/**/*",
+    "README.md",
+    "*.js",
+    "*.d.ts"
+  ],
+  "scripts": {
+    "prebuild": "node -e \"fs.rmSync('./dist', { recursive: true, force: true })\"",
+    "build": "tsup",
+    "build-storybook": "storybook build",
+    "build:watch": "npm run build -- --watch",
+    "format": "prettier --write .",
+    "lint": "eslint --cache .",
+    "lint:fix": "eslint --cache --fix .",
+    "start": "run-p build:watch \"storybook --quiet\"",
+    "storybook": "storybook dev -p 6008 --quiet",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "node scripts/e2e-verify.mjs"
+  },
+  "dependencies": {
+    "html2canvas": "^1.4.1",
+    "react-markdown": "^9.0.3",
+    "remark-gfm": "^4.0.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.36.0",
+    "@storybook/addon-docs": "^10.5.10",
+    "@storybook/addon-mcp": "^0.7.0",
+    "@storybook/react-vite": "^10.5.10",
+    "@types/node": "^20",
+    "@types/react": "^18.2.65",
+    "@types/react-dom": "^18.2.21",
+    "@vitejs/plugin-react": "^4.7.0",
+    "eslint": "^9.36.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-prettier": "^5.5.4",
+    "eslint-plugin-react": "^7.37.5",
+    "eslint-plugin-storybook": "^10.0.0",
+    "jsdom": "^26.1.0",
+    "npm-run-all2": "^8.0.4",
+    "prettier": "^3.6.2",
+    "puppeteer-core": "^25.9.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "storybook": "^10.5.10",
+    "ts-dedent": "^2.2.0",
+    "tsup": "^8.5.0",
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.44.1",
+    "vite": "^6.2.0",
+    "vitest": "^3.2.0"
+  },
+  "peerDependencies": {
+    "storybook": "^9.0.0 || ^10.0.0"
+  },
+  "bundler": {
+    "managerEntries": [
+      "src/manager.tsx"
+    ],
+    "previewEntries": [
+      "src/preview.ts",
+      "src/index.ts"
+    ],
+    "nodeEntries": [
+      "src/preset.ts"
+    ]
+  },
+  "storybook": {
+    "displayName": "LLM Chat",
+    "supportedFrameworks": [
+      "react",
+      "vue",
+      "angular",
+      "web-components",
+      "svelte"
+    ]
+  }
+}
