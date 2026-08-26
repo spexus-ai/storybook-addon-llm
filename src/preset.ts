@@ -1,6 +1,8 @@
 import { createServer, type Server } from 'node:http';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { constants as fsConstants } from 'node:fs';
 import { promises as fs } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 export interface FileServerOptions {
@@ -36,7 +38,7 @@ export function resolveProjectPath(root: string, input: string): string | null {
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'content-type',
+  'Access-Control-Allow-Headers': 'content-type, x-codex-path',
 };
 
 function sendJson(res: import('node:http').ServerResponse, status: number, payload: unknown): void {
@@ -69,9 +71,78 @@ async function readBody(req: import('node:http').IncomingMessage): Promise<Recor
 async function createFileServer(options: FileServerOptions): Promise<FileServerState | null> {
   const root = path.resolve(options.fileRoot ?? process.cwd());
   const basePort = options.fileServerPort ?? DEFAULT_PORT;
-
   let codexVersion: string | null = null;
+  const codexCache = new Map<string, string | null>();
 
+  const isExecutable = async (candidate: string): Promise<boolean> => {
+    try {
+      await fs.access(candidate, fsConstants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  /**
+   * Resolves the codex binary: an explicit user-provided path wins; the
+   * default 'codex' is resolved against PATH (via the spawn test) and a few
+   * common install locations. Results are cached per preferred value.
+   */
+  const resolveCodex = async (preferred: string): Promise<string | null> => {
+    const key = (preferred ?? '').trim() || 'codex';
+    if (codexCache.has(key)) {
+      return codexCache.get(key) ?? null;
+    }
+    const preferredPath = key === 'codex' ? '' : key;
+    let result: string | null = null;
+
+    if (preferredPath) {
+      const expanded = preferredPath.startsWith('~/') ? path.join(os.homedir(), preferredPath.slice(2)) : preferredPath;
+      // keep the explicit path even if not executable so the spawn error
+      // is reported verbatim
+      result = expanded;
+      codexCache.set(key, result);
+      return result;
+    }
+
+    const onPath = await new Promise<string | null>((resolve) => {
+      const child = spawn('codex', ['--version'], { stdio: ['ignore', 'pipe', 'pipe'] });
+      let output = '';
+      child.stdout.on('data', (chunk: Buffer) => {
+        output += chunk.toString();
+      });
+      child.stderr.on('data', (chunk: Buffer) => {
+        output += chunk.toString();
+      });
+      child.on('error', () => resolve(null));
+      child.on('exit', () => resolve(output.trim() ? 'codex' : null));
+      setTimeout(() => resolve(null), 5000);
+    });
+    if (onPath) {
+      result = onPath;
+      codexCache.set(key, result);
+      return result;
+    }
+
+    const home = os.homedir();
+    const candidates = [
+      path.join(home, '.hermes', 'node', 'bin', 'codex'),
+      path.join(home, '.local', 'bin', 'codex'),
+      path.join(home, '.npm-global', 'bin', 'codex'),
+      path.join(home, '.bun', 'bin', 'codex'),
+      '/usr/local/bin/codex',
+      '/opt/homebrew/bin/codex',
+      '/usr/bin/codex',
+    ];
+    for (const candidate of candidates) {
+      if (await isExecutable(candidate)) {
+        result = candidate;
+        break;
+      }
+    }
+    codexCache.set(key, result);
+    return result;
+  };
   const sseHeaders = {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -152,9 +223,18 @@ async function createFileServer(options: FileServerOptions): Promise<FileServerS
     }
 
     if (req.method === 'GET' && url.pathname === '/codex/status') {
+      const preferred = String(req.headers['x-codex-path'] ?? 'codex');
+      const resolved = await resolveCodex(preferred);
+      if (!resolved) {
+        sendJson(res, 200, {
+          ok: false,
+          error: 'codex binary not found on PATH or in common install locations — set the full path in Settings',
+        });
+        return;
+      }
       if (codexVersion === null) {
         codexVersion = await new Promise<string | null>((resolve) => {
-          const child = spawn('codex', ['--version'], { stdio: ['ignore', 'pipe', 'pipe'] });
+          const child = spawn(resolved, ['--version'], { stdio: ['ignore', 'pipe', 'pipe'] });
           let output = '';
           child.stdout.on('data', (chunk: Buffer) => {
             output += chunk.toString();
@@ -167,11 +247,15 @@ async function createFileServer(options: FileServerOptions): Promise<FileServerS
           setTimeout(() => resolve(null), 5000);
         });
       }
-      if (codexVersion) {
-        sendJson(res, 200, { ok: true, version: codexVersion });
-      } else {
-        sendJson(res, 200, { ok: false, error: 'codex binary not found on PATH' });
+      if (!codexVersion) {
+        sendJson(res, 200, { ok: false, path: resolved, error: 'codex binary found but not executable' });
+        return;
       }
+      sendJson(res, 200, {
+        ok: true,
+        version: codexVersion,
+        path: resolved,
+      });
       return;
     }
 
@@ -195,6 +279,15 @@ async function createFileServer(options: FileServerOptions): Promise<FileServerS
         return;
       }
       const codexPath = typeof body.codexPath === 'string' && body.codexPath.trim() ? body.codexPath.trim() : 'codex';
+      const resolvedCodex = await resolveCodex(codexPath);
+      if (!resolvedCodex) {
+        sendJson(res, 400, {
+          ok: false,
+          error:
+            'codex binary not found on PATH or in common install locations — set the full path in Settings (Codex binary path)',
+        });
+        return;
+      }
       const sandbox =
         body.sandbox === 'read-only' || body.sandbox === 'workspace-write' || body.sandbox === 'danger-full-access'
           ? body.sandbox
@@ -244,7 +337,7 @@ async function createFileServer(options: FileServerOptions): Promise<FileServerS
 
       res.writeHead(200, sseHeaders);
 
-      const child = spawn(codexPath, args, {
+      const child = spawn(resolvedCodex, args, {
         cwd: root,
         env: { ...process.env, NO_COLOR: '1' },
         stdio: ['ignore', 'pipe', 'pipe'],

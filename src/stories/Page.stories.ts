@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite';
-import { within, userEvent } from 'storybook/test';
+import { expect, within, userEvent } from 'storybook/test';
 
 import { Page } from './Page';
 
@@ -25,5 +25,8 @@ export const LoggedIn: Story = {
       name: /Log in/i,
     });
     await userEvent.click(loginButton);
+
+    await expect(canvas.getByText(/Welcome, Jane Doe!/i)).toBeInTheDocument();
+    await expect(canvas.getByRole('contentinfo')).toBeInTheDocument();
   },
 };

@@ -113,6 +113,12 @@
   padding-top: 10px;
 }
 
+.sb-llm-modal-hint {
+  font-size: 11px;
+  color: var(--sb-llm-muted);
+  overflow-wrap: anywhere;
+}
+
 .sb-llm-provider-section {
   display: flex;
   flex-direction: column;
@@ -460,6 +466,30 @@
   padding: 10px 12px;
   border-top: 1px solid var(--sb-llm-border);
   flex: 0 0 auto;
+}
+
+.sb-llm-pick-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 auto;
+  border: 1px solid var(--sb-llm-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--sb-llm-fg);
+  cursor: pointer;
+}
+
+.sb-llm-pick-btn:hover {
+  background: var(--sb-llm-hover);
+}
+
+.sb-llm-pick-btn-active {
+  border-color: var(--sb-llm-pink);
+  color: var(--sb-llm-pink);
+  background: rgba(255, 71, 133, 0.12);
 }
 
 .sb-llm-input-row textarea {

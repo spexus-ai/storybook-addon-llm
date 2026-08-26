@@ -228,9 +228,7 @@ try {
 
   // 4. pick an element from the story iframe
   await page.evaluate(() => {
-    const el = [...document.querySelectorAll('button')].find((node) =>
-      node.textContent.trim() === 'Pick element',
-    );
+    const el = document.querySelector('.sb-llm-pick-btn');
     if (el) el.click();
   });
   await new Promise((r) => setTimeout(r, 800));
@@ -277,9 +275,7 @@ try {
 
   // 4b. Escape cancels picking mode
   await page.evaluate(() => {
-    const el = [...document.querySelectorAll('button')].find((node) =>
-      node.textContent.trim() === 'Pick element',
-    );
+    const el = document.querySelector('.sb-llm-pick-btn');
     if (el) el.click();
   });
   await new Promise((r) => setTimeout(r, 600));
@@ -297,10 +293,8 @@ try {
     document.body.classList.contains('storybook-addon-llm-picking'),
   );
   const cancelledInPanel = await page.evaluate(() => {
-    const el = [...document.querySelectorAll('button')].find((node) =>
-      node.textContent.trim() === 'Pick element',
-    );
-    return el ? !el.classList.contains('sb-llm-header-btn-active') : true;
+    const el = document.querySelector('.sb-llm-pick-btn');
+    return el ? !el.classList.contains('sb-llm-pick-btn-active') : true;
   });
   step('Escape cancels picking (iframe)', !cancelledInFrame);
   step('Escape cancels picking (panel button state)', cancelledInPanel);

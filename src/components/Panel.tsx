@@ -15,6 +15,7 @@ import type { ChatMessage, LLMSettings, StoryContextData, ToolEvent } from '../t
 import type { ToolDefinition } from '../llm/tools';
 import { uid } from '../utils';
 import { attachmentStore } from './attachmentStore';
+import { ChatInput } from './ChatInput';
 import { ContextChips } from './ContextChips';
 import { Message } from './Message';
 import { SettingsModal } from './SettingsModal';
@@ -66,7 +67,6 @@ export const Panel: React.FC<PanelProps> = ({ active }) => {
   const api = useStorybookApi();
   const [globals, updateGlobals] = useGlobals();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settings, setSettings] = useState<LLMSettings>(() => loadSettings());
@@ -76,6 +76,7 @@ export const Panel: React.FC<PanelProps> = ({ active }) => {
   const [fileServerRoot, setFileServerRoot] = useState<string | null>(null);
   const [codexThreadId, setCodexThreadId] = useState<string | null>(null);
   const [codexStatus, setCodexStatus] = useState<'loading' | 'online' | 'offline'>('loading');
+  const [codexDetectedPath, setCodexDetectedPath] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const mcpClientRef = useRef<MCPClient | null>(null);
@@ -150,29 +151,42 @@ export const Panel: React.FC<PanelProps> = ({ active }) => {
         if (!url) {
           if (!cancelled) {
             setCodexStatus('offline');
+            setCodexDetectedPath(null);
           }
           return;
         }
         try {
-          const response = await fetch(`${url}/codex/status`);
+          const response = await fetch(`${url}/codex/status`, {
+            headers: { 'x-codex-path': settings.codexPath },
+          });
           const json = await response.json().catch(() => null);
           if (!cancelled) {
             setCodexStatus(json?.ok ? 'online' : 'offline');
+            setCodexDetectedPath(typeof json?.path === 'string' ? json.path : null);
           }
         } catch {
           if (!cancelled) {
             setCodexStatus('offline');
+            setCodexDetectedPath(null);
           }
         }
       });
     } else {
       setCodexStatus('offline');
+      setCodexDetectedPath(null);
     }
 
     return () => {
       cancelled = true;
     };
-  }, [settings.fileTools, settings.fileServerPort, settings.mcpBridge, settings.mcpUrl, settings.provider]);
+  }, [
+    settings.fileTools,
+    settings.fileServerPort,
+    settings.mcpBridge,
+    settings.mcpUrl,
+    settings.provider,
+    settings.codexPath,
+  ]);
 
   const handleSettingsChange = useCallback((next: LLMSettings) => {
     setSettings(next);
@@ -183,273 +197,274 @@ export const Panel: React.FC<PanelProps> = ({ active }) => {
     updateGlobals({ [KEY]: !isPicking });
   }, [updateGlobals, isPicking]);
 
-  const send = useCallback(async () => {
-    const text = input.trim();
-    if (!text || streaming) {
-      return;
-    }
-    if (settings.provider === 'api' && !settings.apiKey) {
-      setSettingsOpen(true);
-      return;
-    }
+  const send = useCallback(
+    async (rawText: string) => {
+      const text = rawText.trim();
+      if (!text || streaming) {
+        return;
+      }
+      if (settings.provider === 'api' && !settings.apiKey) {
+        setSettingsOpen(true);
+        return;
+      }
 
-    setInput('');
-    const nextAttachments = attachments.length ? attachments : undefined;
-    const userMessage: ChatMessage = {
-      id: uid(),
-      role: 'user',
-      content: text,
-      attachments: nextAttachments,
-    };
-    const history = [...messages, userMessage];
-    setMessages(history);
-    if (nextAttachments) {
-      attachmentStore.clear();
-    }
+      const nextAttachments = attachments.length ? attachments : undefined;
+      const userMessage: ChatMessage = {
+        id: uid(),
+        role: 'user',
+        content: text,
+        attachments: nextAttachments,
+      };
+      const history = [...messages, userMessage];
+      setMessages(history);
+      if (nextAttachments) {
+        attachmentStore.clear();
+      }
 
-    const assistantId = uid();
-    setMessages((current) => [...current, { id: assistantId, role: 'assistant', content: '' }]);
-    setStreaming(true);
+      const assistantId = uid();
+      setMessages((current) => [...current, { id: assistantId, role: 'assistant', content: '' }]);
+      setStreaming(true);
 
-    const controller = new AbortController();
-    abortRef.current = controller;
+      const controller = new AbortController();
+      abortRef.current = controller;
 
-    const errorMessage = (error: unknown): string =>
-      error instanceof LLMError || error instanceof Error ? error.message : String(error);
-    const isAbort = (error: unknown): boolean => error instanceof DOMException && error.name === 'AbortError';
+      const errorMessage = (error: unknown): string =>
+        error instanceof LLMError || error instanceof Error ? error.message : String(error);
+      const isAbort = (error: unknown): boolean => error instanceof DOMException && error.name === 'AbortError';
 
-    const updateAssistant = (patch: Partial<ChatMessage>) =>
-      setMessages((current) =>
-        current.map((message) => (message.id === assistantId ? { ...message, ...patch } : message)),
-      );
+      const updateAssistant = (patch: Partial<ChatMessage>) =>
+        setMessages((current) =>
+          current.map((message) => (message.id === assistantId ? { ...message, ...patch } : message)),
+        );
 
-    // Codex CLI provider: run `codex exec` through the addon's local server.
-    if (settings.provider === 'codex') {
-      try {
-        if (!fileServerUrl) {
-          updateAssistant({
-            error:
-              'The local addon server is not available — codex runs through the addon preset (check that it loaded and the port matches).',
-          });
-        } else {
-          let accumulated = '';
-          const toolEvents: ToolEvent[] = [];
-          const handlers: CodexHandlers = {
-            onText: (delta) => {
-              accumulated += delta;
-              updateAssistant({ content: accumulated });
-            },
-            onItem: (item) => {
-              toolEvents.push({
-                id: uid(),
-                name: item.type,
-                detail: summarizeItem(item),
-                ok: item.status !== 'failed',
-              });
-              updateAssistant({ tools: [...toolEvents] });
-            },
-            onError: (message) => {
-              updateAssistant({ error: message });
-            },
-            onThreadId: (id) => {
-              setCodexThreadId(id);
-            },
-          };
-          await runCodex(
-            fileServerUrl,
-            {
-              prompt: buildCodexPrompt({
-                settings,
-                story,
-                userContent: text,
-                attachments: nextAttachments,
-              }),
-              sandbox: settings.codexSandbox,
-              model: settings.codexModel,
-              sessionId: settings.codexSession ? (codexThreadId ?? '') : '',
-              skipGitCheck: settings.codexSkipGitCheck,
-              approveForMe: settings.codexApproveForMe,
-              keepSession: settings.codexSession,
-              codexPath: settings.codexPath,
-            },
-            handlers,
-            controller.signal,
-          );
-          if (!accumulated.trim() && !toolEvents.length) {
-            updateAssistant({ error: 'codex returned no output' });
+      // Codex CLI provider: run `codex exec` through the addon's local server.
+      if (settings.provider === 'codex') {
+        try {
+          if (!fileServerUrl) {
+            updateAssistant({
+              error:
+                'The local addon server is not available — codex runs through the addon preset (check that it loaded and the port matches).',
+            });
+          } else {
+            let accumulated = '';
+            const toolEvents: ToolEvent[] = [];
+            const handlers: CodexHandlers = {
+              onText: (delta) => {
+                accumulated += delta;
+                updateAssistant({ content: accumulated });
+              },
+              onItem: (item) => {
+                toolEvents.push({
+                  id: uid(),
+                  name: item.type,
+                  detail: summarizeItem(item),
+                  ok: item.status !== 'failed',
+                });
+                updateAssistant({ tools: [...toolEvents] });
+              },
+              onError: (message) => {
+                updateAssistant({ error: message });
+              },
+              onThreadId: (id) => {
+                setCodexThreadId(id);
+              },
+            };
+            await runCodex(
+              fileServerUrl,
+              {
+                prompt: buildCodexPrompt({
+                  settings,
+                  story,
+                  userContent: text,
+                  attachments: nextAttachments,
+                }),
+                sandbox: settings.codexSandbox,
+                model: settings.codexModel,
+                sessionId: settings.codexSession ? (codexThreadId ?? '') : '',
+                skipGitCheck: settings.codexSkipGitCheck,
+                approveForMe: settings.codexApproveForMe,
+                keepSession: settings.codexSession,
+                codexPath: settings.codexPath,
+              },
+              handlers,
+              controller.signal,
+            );
+            if (!accumulated.trim() && !toolEvents.length) {
+              updateAssistant({ error: 'codex returned no output' });
+            }
           }
+        } catch (error) {
+          if (!isAbort(error)) {
+            updateAssistant({ error: errorMessage(error) });
+          }
+        } finally {
+          setStreaming(false);
+          abortRef.current = null;
         }
-      } catch (error) {
-        if (!isAbort(error)) {
-          updateAssistant({ error: errorMessage(error) });
+        return;
+      }
+
+      let retriedWithoutImages = false;
+
+      // The request may be retried once without image parts when the model
+      // turns out to be text-only (e.g. DeepSeek).
+      try {
+        while (true) {
+          const callSettings = retriedWithoutImages ? { ...settings, sendScreenshots: false } : settings;
+          let accumulated = '';
+          try {
+            // The API messages list may grow with tool calls and tool results.
+            const apiMessages = buildMessages({
+              settings: callSettings,
+              story,
+              history: messages,
+              userContent: text,
+              attachments: nextAttachments,
+            });
+            let toolEvents: ToolEvent[] = [];
+            let hadTools = false;
+
+            // Merge core, file and MCP tools, keeping names unique
+            // (providers reject requests with duplicate tool names).
+            const seenNames = new Set<string>();
+            const addTools = (tools: ToolDefinition[]) => {
+              for (const tool of tools) {
+                if (!seenNames.has(tool.function.name)) {
+                  seenNames.add(tool.function.name);
+                  merged.push(tool);
+                }
+              }
+            };
+            const merged: ToolDefinition[] = [];
+            addTools(TOOL_DEFINITIONS);
+            if (callSettings.fileTools) {
+              addTools(FILE_TOOL_DEFINITIONS);
+            }
+            addTools(
+              mcpTools.map((tool) => ({
+                type: 'function' as const,
+                function: {
+                  name: tool.name,
+                  description: tool.description ?? '',
+                  parameters: tool.inputSchema ?? { type: 'object', properties: {} },
+                },
+              })),
+            );
+            const requestTools = merged;
+
+            const mcpContext = mcpClientRef.current
+              ? { client: mcpClientRef.current, toolNames: new Set(mcpTools.map((tool) => tool.name)) }
+              : null;
+
+            while (true) {
+              const result = await streamChatCompletionFull(
+                callSettings,
+                apiMessages,
+                requestTools,
+                controller.signal,
+                (delta) => {
+                  accumulated += delta;
+                  updateAssistant({ content: accumulated });
+                },
+              );
+              if (!result.toolCalls.length) {
+                if (!accumulated && result.content) {
+                  accumulated = result.content;
+                  updateAssistant({ content: accumulated });
+                }
+                break;
+              }
+
+              hadTools = true;
+              apiMessages.push({
+                role: 'assistant',
+                content: result.content || '',
+                tool_calls: result.toolCalls,
+              });
+
+              const events: ToolEvent[] = [];
+              for (const call of result.toolCalls) {
+                const execution = await executeToolCall(call, {
+                  story,
+                  fileServer: fileServerUrl,
+                  mcp: mcpContext,
+                  updateStoryArgs: (newArgs) => {
+                    const currentStory = api.getCurrentStoryData();
+                    if (currentStory && currentStory.type === 'story') {
+                      api.updateStoryArgs(currentStory, {
+                        ...(currentStory.args ?? {}),
+                        ...newArgs,
+                      });
+                    }
+                  },
+                });
+                events.push({
+                  id: call.id,
+                  name: call.function.name,
+                  detail: execution.detail,
+                  ok: execution.ok,
+                });
+                apiMessages.push({
+                  role: 'tool',
+                  tool_call_id: call.id,
+                  content: JSON.stringify(execution.output),
+                });
+              }
+              toolEvents = [...toolEvents, ...events];
+              updateAssistant({ tools: toolEvents });
+            }
+
+            if (hadTools) {
+              updateAssistant({ tools: toolEvents });
+            }
+
+            if (retriedWithoutImages) {
+              accumulated = `_The model does not support images — the request was re-sent with text/HTML only._\n\n${accumulated}`;
+            }
+            updateAssistant({ content: accumulated });
+
+            if (!accumulated.trim() && !hadTools) {
+              updateAssistant({ error: 'The model returned an empty response.' });
+            }
+            break;
+          } catch (error) {
+            if (isAbort(error)) {
+              break;
+            }
+            const message = errorMessage(error);
+            const hadImages =
+              !retriedWithoutImages &&
+              callSettings.sendScreenshots &&
+              (nextAttachments?.some((attachment) => attachment.screenshot) ?? false);
+            if (hadImages && isImageUnsupportedError(message)) {
+              retriedWithoutImages = true;
+              // Persist the discovery: turn the screenshots toggle off.
+              handleSettingsChange({ ...settings, sendScreenshots: false });
+              updateAssistant({ content: '' });
+              continue;
+            }
+            updateAssistant({ error: message });
+            break;
+          }
         }
       } finally {
         setStreaming(false);
         abortRef.current = null;
       }
-      return;
-    }
-
-    let retriedWithoutImages = false;
-
-    // The request may be retried once without image parts when the model
-    // turns out to be text-only (e.g. DeepSeek).
-    try {
-      while (true) {
-        const callSettings = retriedWithoutImages ? { ...settings, sendScreenshots: false } : settings;
-        let accumulated = '';
-        try {
-          // The API messages list may grow with tool calls and tool results.
-          const apiMessages = buildMessages({
-            settings: callSettings,
-            story,
-            history: messages,
-            userContent: text,
-            attachments: nextAttachments,
-          });
-          let toolEvents: ToolEvent[] = [];
-          let hadTools = false;
-
-          // Merge core, file and MCP tools, keeping names unique
-          // (providers reject requests with duplicate tool names).
-          const seenNames = new Set<string>();
-          const addTools = (tools: ToolDefinition[]) => {
-            for (const tool of tools) {
-              if (!seenNames.has(tool.function.name)) {
-                seenNames.add(tool.function.name);
-                merged.push(tool);
-              }
-            }
-          };
-          const merged: ToolDefinition[] = [];
-          addTools(TOOL_DEFINITIONS);
-          if (callSettings.fileTools) {
-            addTools(FILE_TOOL_DEFINITIONS);
-          }
-          addTools(
-            mcpTools.map((tool) => ({
-              type: 'function' as const,
-              function: {
-                name: tool.name,
-                description: tool.description ?? '',
-                parameters: tool.inputSchema ?? { type: 'object', properties: {} },
-              },
-            })),
-          );
-          const requestTools = merged;
-
-          const mcpContext = mcpClientRef.current
-            ? { client: mcpClientRef.current, toolNames: new Set(mcpTools.map((tool) => tool.name)) }
-            : null;
-
-          while (true) {
-            const result = await streamChatCompletionFull(
-              callSettings,
-              apiMessages,
-              requestTools,
-              controller.signal,
-              (delta) => {
-                accumulated += delta;
-                updateAssistant({ content: accumulated });
-              },
-            );
-            if (!result.toolCalls.length) {
-              if (!accumulated && result.content) {
-                accumulated = result.content;
-                updateAssistant({ content: accumulated });
-              }
-              break;
-            }
-
-            hadTools = true;
-            apiMessages.push({
-              role: 'assistant',
-              content: result.content || '',
-              tool_calls: result.toolCalls,
-            });
-
-            const events: ToolEvent[] = [];
-            for (const call of result.toolCalls) {
-              const execution = await executeToolCall(call, {
-                story,
-                fileServer: fileServerUrl,
-                mcp: mcpContext,
-                updateStoryArgs: (newArgs) => {
-                  const currentStory = api.getCurrentStoryData();
-                  if (currentStory && currentStory.type === 'story') {
-                    api.updateStoryArgs(currentStory, {
-                      ...(currentStory.args ?? {}),
-                      ...newArgs,
-                    });
-                  }
-                },
-              });
-              events.push({
-                id: call.id,
-                name: call.function.name,
-                detail: execution.detail,
-                ok: execution.ok,
-              });
-              apiMessages.push({
-                role: 'tool',
-                tool_call_id: call.id,
-                content: JSON.stringify(execution.output),
-              });
-            }
-            toolEvents = [...toolEvents, ...events];
-            updateAssistant({ tools: toolEvents });
-          }
-
-          if (hadTools) {
-            updateAssistant({ tools: toolEvents });
-          }
-
-          if (retriedWithoutImages) {
-            accumulated = `_The model does not support images — the request was re-sent with text/HTML only._\n\n${accumulated}`;
-          }
-          updateAssistant({ content: accumulated });
-
-          if (!accumulated.trim() && !hadTools) {
-            updateAssistant({ error: 'The model returned an empty response.' });
-          }
-          break;
-        } catch (error) {
-          if (isAbort(error)) {
-            break;
-          }
-          const message = errorMessage(error);
-          const hadImages =
-            !retriedWithoutImages &&
-            callSettings.sendScreenshots &&
-            (nextAttachments?.some((attachment) => attachment.screenshot) ?? false);
-          if (hadImages && isImageUnsupportedError(message)) {
-            retriedWithoutImages = true;
-            // Persist the discovery: turn the screenshots toggle off.
-            handleSettingsChange({ ...settings, sendScreenshots: false });
-            updateAssistant({ content: '' });
-            continue;
-          }
-          updateAssistant({ error: message });
-          break;
-        }
-      }
-    } finally {
-      setStreaming(false);
-      abortRef.current = null;
-    }
-  }, [
-    input,
-    streaming,
-    settings,
-    messages,
-    attachments,
-    story,
-    handleSettingsChange,
-    api,
-    mcpTools,
-    fileServerUrl,
-    codexThreadId,
-  ]);
+    },
+    [
+      streaming,
+      settings,
+      messages,
+      attachments,
+      story,
+      handleSettingsChange,
+      api,
+      mcpTools,
+      fileServerUrl,
+      codexThreadId,
+    ],
+  );
 
   const stop = useCallback(() => {
     abortRef.current?.abort();
@@ -472,7 +487,7 @@ export const Panel: React.FC<PanelProps> = ({ active }) => {
           {settings.provider === 'codex' && (
             <span
               className={`sb-llm-status${codexStatus === 'online' ? '' : ' sb-llm-status-off'}`}
-              title="Codex CLI binary"
+              title={codexDetectedPath ?? 'Codex CLI binary'}
             >
               Codex: {codexStatus === 'online' ? 'ready' : codexStatus === 'loading' ? '…' : 'not found'}
             </span>
@@ -498,14 +513,6 @@ export const Panel: React.FC<PanelProps> = ({ active }) => {
             </span>
           )}
           <span className="sb-llm-header-spacer" />
-          <button
-            type="button"
-            className={`sb-llm-header-btn${isPicking ? ' sb-llm-header-btn-active' : ''}`}
-            title={isPicking ? 'Stop picking (Esc)' : 'Pick an element of the story for the chat context'}
-            onClick={togglePicking}
-          >
-            {isPicking ? 'Stop picking' : 'Pick element'}
-          </button>
           <button
             type="button"
             className="sb-llm-header-btn"
@@ -536,8 +543,8 @@ export const Panel: React.FC<PanelProps> = ({ active }) => {
           {messages.length === 0 && (
             <div className="sb-llm-empty">
               <p>
-                Chat with an LLM about the current story. Pick an element of the story (button above or in the toolbar)
-                to attach it to your next message.
+                Chat with an LLM about the current story. Pick an element of the story (the inspect button next to the
+                input, or the toolbar) to attach it to your next message.
               </p>
               <p>
                 <button type="button" className="sb-llm-link" onClick={() => setSettingsOpen(true)}>
@@ -552,32 +559,21 @@ export const Panel: React.FC<PanelProps> = ({ active }) => {
           ))}
         </div>
 
-        <div className="sb-llm-input-row">
-          <textarea
-            value={input}
-            onChange={(event) => setInput(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter' && !event.shiftKey) {
-                event.preventDefault();
-                void send();
-              }
-            }}
-            placeholder="Ask about this story… (Enter to send, Shift+Enter for a new line)"
-            rows={2}
-          />
-          {streaming ? (
-            <button type="button" className="sb-llm-send" onClick={stop}>
-              Stop
-            </button>
-          ) : (
-            <button type="button" className="sb-llm-send" onClick={() => void send()} disabled={!input.trim()}>
-              Send
-            </button>
-          )}
-        </div>
+        <ChatInput
+          streaming={streaming}
+          picking={isPicking}
+          onTogglePicking={togglePicking}
+          onSend={(text) => void send(text)}
+          onStop={stop}
+        />
 
         {settingsOpen && (
-          <SettingsModal settings={settings} onChange={handleSettingsChange} onClose={() => setSettingsOpen(false)} />
+          <SettingsModal
+            settings={settings}
+            codexDetectedPath={codexDetectedPath}
+            onChange={handleSettingsChange}
+            onClose={() => setSettingsOpen(false)}
+          />
         )}
       </div>
     </AddonPanel>

@@ -7,6 +7,7 @@ interface SettingsModalProps {
   settings: LLMSettings;
   onChange: (settings: LLMSettings) => void;
   onClose: () => void;
+  codexDetectedPath?: string | null;
 }
 
 const PRESETS: Array<{ name: string; baseURL: string; model: string }> = [
@@ -15,7 +16,7 @@ const PRESETS: Array<{ name: string; baseURL: string; model: string }> = [
   { name: 'Custom', baseURL: '', model: '' },
 ];
 
-export const SettingsModal: React.FC<SettingsModalProps> = ({ settings, onChange, onClose }) => {
+export const SettingsModal: React.FC<SettingsModalProps> = ({ settings, onChange, onClose, codexDetectedPath }) => {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<ConnectionTestResult | null>(null);
 
@@ -133,6 +134,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ settings, onChange
                 onChange={(event) => set('codexPath', event.target.value)}
                 placeholder="codex"
               />
+              {codexDetectedPath && <span className="sb-llm-modal-hint">Detected: {codexDetectedPath}</span>}
             </label>
 
             <label className="sb-llm-modal-field">

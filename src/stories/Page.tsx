@@ -12,7 +12,7 @@ export const Page: React.FC = () => {
   const [user, setUser] = React.useState<User>();
 
   return (
-    <article>
+    <div className="storybook-page">
       <Header
         user={user}
         onLogin={() => setUser({ name: 'Jane Doe' })}
@@ -20,7 +20,7 @@ export const Page: React.FC = () => {
         onCreateAccount={() => setUser({ name: 'Jane Doe' })}
       />
 
-      <section>
+      <main>
         <h2>Pages in Storybook</h2>
         <div className="page-actions">
           <Button label="Home" />
@@ -70,7 +70,21 @@ export const Page: React.FC = () => {
           </svg>
           Viewports addon in the toolbar
         </div>
-      </section>
-    </article>
+      </main>
+
+      <footer className="page-footer">
+        <div className="page-footer__content">
+          <p>© Acme. Built with Storybook.</p>
+          <nav aria-label="Footer navigation">
+            <a href="https://storybook.js.org/docs" target="_blank" rel="noopener noreferrer">
+              Documentation
+            </a>
+            <a href="https://github.com/storybookjs/storybook" target="_blank" rel="noopener noreferrer">
+              GitHub
+            </a>
+          </nav>
+        </div>
+      </footer>
+    </div>
   );
 };
