@@ -516,7 +516,8 @@ try {
 
   const codexLog = fs.readFileSync('/tmp/mock-codex-args.log', 'utf8');
   step('Resume passed the session id to codex', codexLog.includes('resume thread-123'));
-  step('Sandbox flag passed to codex', codexLog.includes('workspace-write'));
+  step('Approve-for-me flag passed to codex', codexLog.includes('--approve-for-me'));
+  step('No conflicting --sandbox flag with approve-for-me', !codexLog.includes('--sandbox workspace-write'));
   step('Prompt passed to codex', codexLog.includes('позови кодекс'));
 
   // 7. no console errors (the deliberate 400 from the image-rejection

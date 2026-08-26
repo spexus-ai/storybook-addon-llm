@@ -202,7 +202,10 @@ async function createFileServer(options: FileServerOptions): Promise<FileServerS
       const model = typeof body.model === 'string' ? body.model.trim() : '';
       const sessionId = typeof body.sessionId === 'string' ? body.sessionId.trim() : '';
       const skipGitCheck = body.skipGitCheck === true;
+      // --approve-for-me implies the workspace-write sandbox; codex rejects the
+      // combination with an explicit --sandbox flag.
       const approveForMe = body.approveForMe === true && sandbox === 'workspace-write';
+      const explicitSandbox = sandbox === 'read-only' || sandbox === 'danger-full-access';
       const keepSession = body.keepSession === true;
 
       const args = ['exec'];
@@ -223,7 +226,9 @@ async function createFileServer(options: FileServerOptions): Promise<FileServerS
         if (!keepSession) {
           args.push('--ephemeral');
         }
-        args.push('--sandbox', sandbox);
+        if (explicitSandbox) {
+          args.push('--sandbox', sandbox);
+        }
         if (approveForMe) {
           args.push('--approve-for-me');
         }

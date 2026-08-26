@@ -1,10 +1,10 @@
-import React from 'react';
+import React, { memo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 import type { ChatMessage } from '../types';
 
-export const Message: React.FC<{ message: ChatMessage }> = ({ message }) => {
+export const Message = memo(function Message({ message }: { message: ChatMessage }) {
   const isUser = message.role === 'user';
 
   return (
@@ -59,4 +59,4 @@ export const Message: React.FC<{ message: ChatMessage }> = ({ message }) => {
       )}
     </div>
   );
-};
+});

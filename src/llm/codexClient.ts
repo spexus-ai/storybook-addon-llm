@@ -93,6 +93,7 @@ export async function runCodex(
   let buffer = '';
   let sawAgentMessage = false;
   let sawItem = false;
+  const stderrLines: string[] = [];
 
   const consume = (events: string[]) => {
     for (const event of events) {
@@ -162,13 +163,24 @@ export async function runCodex(
           const error = typeof payload.error === 'string' ? payload.error : null;
           if (error) {
             handlers.onError(error);
-          } else if (code !== null && code !== 0 && !sawAgentMessage && !sawItem) {
-            handlers.onError(`codex exited with code ${code}`);
+          } else if (code !== null && code !== 0) {
+            handlers.onError(
+              stderrLines.length
+                ? stderrLines.join('\n')
+                : sawAgentMessage || sawItem
+                  ? `codex exited with code ${code}`
+                  : `codex exited with code ${code} and produced no output`,
+            );
           }
           break;
         }
         case 'stderr': {
-          // progress messages; only surface when there's a problem and no output yet
+          if (typeof payload.text === 'string' && payload.text.trim()) {
+            stderrLines.push(payload.text.trim());
+            if (stderrLines.length > 8) {
+              stderrLines.shift();
+            }
+          }
           break;
         }
         default:
