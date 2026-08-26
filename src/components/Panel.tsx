@@ -254,7 +254,7 @@ export const Panel: React.FC<PanelProps> = ({ active }) => {
                 updateAssistant({ content: accumulated });
               },
               onItem: (item) => {
-                if (item.type === 'command_execution') {
+                if (item.type.includes('command')) {
                   toolEvents.push({ id: uid(), name: 'Запустил команду', detail: '', ok: item.status !== 'failed' });
                 } else {
                   toolEvents.push({
