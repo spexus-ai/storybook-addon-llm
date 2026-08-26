@@ -15,7 +15,9 @@ export async function findFileServer(basePort: number): Promise<string | null> {
       clearTimeout(timeout);
       if (response.ok) {
         const json = await response.json().catch(() => null);
-        if (json?.ok) {
+        // Verify the responder is really the addon's server, not some other
+        // local service that happens to listen on the same port.
+        if (json?.ok && json?.service === 'storybook-addon-llm') {
           return origin;
         }
       }

@@ -218,7 +218,7 @@ async function createFileServer(options: FileServerOptions): Promise<FileServerS
     const url = new URL(req.url ?? '/', 'http://localhost');
 
     if (req.method === 'GET' && url.pathname === '/health') {
-      sendJson(res, 200, { ok: true, root, port: basePort });
+      sendJson(res, 200, { ok: true, service: 'storybook-addon-llm', root, port: basePort });
       return;
     }
 

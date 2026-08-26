@@ -68,12 +68,23 @@ export async function runCodex(
   handlers: CodexHandlers,
   signal?: AbortSignal,
 ): Promise<void> {
-  const response = await fetch(`${serverUrl}/codex/run`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
-    signal,
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${serverUrl}/codex/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+      signal,
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw error;
+    }
+    throw new Error(
+      `Could not reach the addon's local server at ${serverUrl}/codex/run (CORS/network error). ` +
+        'Restart Storybook after installing/updating the addon, and make sure nothing else occupies the file-server port.',
+    );
+  }
 
   if (!response.ok || !response.body) {
     let message = `codex run failed with status ${response.status}`;
