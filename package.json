@@ -48,7 +48,8 @@
     "storybook": "storybook dev -p 6008 --quiet",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "node scripts/e2e-verify.mjs"
+    "test:e2e": "node scripts/e2e-verify.mjs",
+    "prepare": "npm run build"
   },
   "dependencies": {
     "html2canvas": "^1.4.1",
