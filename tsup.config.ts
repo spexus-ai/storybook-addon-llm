@@ -35,7 +35,7 @@ export default defineConfig(async () => {
      Storybook would otherwise re-resolve them against the project and hit a
      jsx-runtime/ReactSharedInternals mismatch.
     */
-    noExternal: ['react-markdown', 'remark-gfm'],
+    noExternal: ['marked', 'dompurify'],
     /*
      Inline CSS imports into the JS bundle (injects a <style> tag at runtime),
      because manager entries can't ship separate CSS files.

@@ -1,11 +1,12 @@
-import React, { memo } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import React, { memo, useMemo } from 'react';
 
+import { renderMarkdown } from '../markdown';
 import type { ChatMessage } from '../types';
 
 export const Message = memo(function Message({ message }: { message: ChatMessage }) {
   const isUser = message.role === 'user';
+
+  const renderedContent = useMemo(() => (message.content ? renderMarkdown(message.content) : ''), [message.content]);
 
   return (
     <div className={`sb-llm-msg${isUser ? ' sb-llm-msg-user' : ' sb-llm-msg-assistant'}`}>
@@ -44,10 +45,8 @@ export const Message = memo(function Message({ message }: { message: ChatMessage
         </div>
       )}
 
-      {message.content ? (
-        <div className="sb-llm-msg-content">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
-        </div>
+      {renderedContent ? (
+        <div className="sb-llm-msg-content" dangerouslySetInnerHTML={{ __html: renderedContent }} />
       ) : !message.error && !(message.tools && message.tools.length > 0) ? (
         <div className="sb-llm-msg-pending">Thinking…</div>
       ) : null}

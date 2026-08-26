@@ -1,6 +1,6 @@
 {
   "name": "storybook-addon-llm",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Chat with any OpenAI-compatible LLM inside Storybook. Pick elements of the open story and add them to the chat context.",
   "keywords": [
     "storybook-addon",
@@ -52,9 +52,9 @@
     "prepare": "npm run build"
   },
   "dependencies": {
+    "dompurify": "^3.4.14",
     "html2canvas": "^1.4.1",
-    "react-markdown": "^9.0.3",
-    "remark-gfm": "^4.0.1"
+    "marked": "^18.0.11"
   },
   "devDependencies": {
     "@eslint/js": "^9.36.0",
