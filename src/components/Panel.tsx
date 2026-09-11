@@ -4,14 +4,23 @@ import { useGlobals, useStorybookApi } from 'storybook/manager-api';
 
 import { KEY } from '../constants';
 import { isImageUnsupportedError, LLMError, streamChatCompletionFull } from '../llm/client';
-import { runCodex, summarizeItem, type CodexHandlers } from '../llm/codexClient';
+import {
+  getCodexConfig,
+  listCodexSessions,
+  loadCodexSession,
+  runCodex,
+  saveCodexSession,
+  summarizeItem,
+  type CodexConfigResponse,
+  type CodexHandlers,
+} from '../llm/codexClient';
 import { buildCodexPrompt, buildMessages } from '../llm/context';
 import { findFileServer } from '../llm/fileTools';
 import { MCPClient, resolveMcpUrl, type MCPTool } from '../llm/mcpClient';
 import { loadSettings, saveSettings } from '../llm/storage';
 import { FILE_TOOL_DEFINITIONS, TOOL_DEFINITIONS } from '../llm/tools';
 import { executeToolCall } from '../toolExecutor';
-import type { ChatMessage, LLMSettings, StoryContextData, ToolEvent } from '../types';
+import type { ChatMessage, ChatSessionSummary, LLMSettings, MessagePart, StoryContextData, ToolEvent } from '../types';
 import type { ToolDefinition } from '../llm/tools';
 import { uid } from '../utils';
 import { attachmentStore } from './attachmentStore';
@@ -25,6 +34,7 @@ interface PanelProps {
 }
 
 type StoryData = ReturnType<ReturnType<typeof useStorybookApi>['getCurrentStoryData']>;
+const ACTIVE_SESSION_KEY = 'storybook-addon-llm:active-codex-session';
 
 function toRelativePath(root: string, path: string): string {
   const normalizedRoot = root.replace(/\/+$/, '');
@@ -77,6 +87,10 @@ export const Panel: React.FC<PanelProps> = ({ active }) => {
   const [codexThreadId, setCodexThreadId] = useState<string | null>(null);
   const [codexStatus, setCodexStatus] = useState<'loading' | 'online' | 'offline'>('loading');
   const [codexDetectedPath, setCodexDetectedPath] = useState<string | null>(null);
+  const [codexConfig, setCodexConfig] = useState<CodexConfigResponse | null>(null);
+  const [sessions, setSessions] = useState<ChatSessionSummary[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [sessionCreatedAt, setSessionCreatedAt] = useState(Date.now());
   const abortRef = useRef<AbortController | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const mcpClientRef = useRef<MCPClient | null>(null);
@@ -96,25 +110,27 @@ export const Panel: React.FC<PanelProps> = ({ active }) => {
     let cancelled = false;
 
     if (settings.fileTools) {
-      void findFileServer(settings.fileServerPort).then(async (url) => {
-        if (cancelled) {
-          return;
-        }
-        setFileServerUrl(url);
-        if (url) {
-          try {
-            const response = await fetch(`${url}/health`);
-            const json = await response.json().catch(() => null);
-            if (typeof json?.root === 'string') {
-              setFileServerRoot(json.root);
-              return;
-            }
-          } catch {
-            // ignore; root stays unknown
+      void findFileServer(settings.fileServerPort, settings.provider === 'codex' ? 'codex-config' : undefined).then(
+        async (url) => {
+          if (cancelled) {
+            return;
           }
-        }
-        setFileServerRoot(null);
-      });
+          setFileServerUrl(url);
+          if (url) {
+            try {
+              const response = await fetch(`${url}/health`);
+              const json = await response.json().catch(() => null);
+              if (typeof json?.root === 'string') {
+                setFileServerRoot(json.root);
+                return;
+              }
+            } catch {
+              // ignore; root stays unknown
+            }
+          }
+          setFileServerRoot(null);
+        },
+      );
     } else if (!cancelled) {
       setFileServerUrl(null);
       setFileServerRoot(null);
@@ -147,7 +163,7 @@ export const Panel: React.FC<PanelProps> = ({ active }) => {
 
     if (settings.provider === 'codex' && settings.fileTools) {
       setCodexStatus('loading');
-      void findFileServer(settings.fileServerPort).then(async (url) => {
+      void findFileServer(settings.fileServerPort, 'codex-config').then(async (url) => {
         if (!url) {
           if (!cancelled) {
             setCodexStatus('offline');
@@ -156,46 +172,144 @@ export const Panel: React.FC<PanelProps> = ({ active }) => {
           return;
         }
         try {
-          const response = await fetch(`${url}/codex/status`, {
-            headers: { 'x-codex-path': settings.codexPath },
-          });
+          setFileServerUrl(url);
+          const [response, config] = await Promise.all([fetch(`${url}/codex/status`), getCodexConfig(url)]);
           const json = await response.json().catch(() => null);
           if (!cancelled) {
             setCodexStatus(json?.ok ? 'online' : 'offline');
             setCodexDetectedPath(typeof json?.path === 'string' ? json.path : null);
+            setCodexConfig(config);
           }
         } catch {
           if (!cancelled) {
             setCodexStatus('offline');
             setCodexDetectedPath(null);
+            setCodexConfig(null);
           }
         }
       });
     } else {
       setCodexStatus('offline');
       setCodexDetectedPath(null);
+      setCodexConfig(null);
     }
 
     return () => {
       cancelled = true;
     };
-  }, [
-    settings.fileTools,
-    settings.fileServerPort,
-    settings.mcpBridge,
-    settings.mcpUrl,
-    settings.provider,
-    settings.codexPath,
-  ]);
+  }, [settings.fileTools, settings.fileServerPort, settings.mcpBridge, settings.mcpUrl, settings.provider]);
 
   const handleSettingsChange = useCallback((next: LLMSettings) => {
     setSettings(next);
     saveSettings(next);
   }, []);
 
+  const handleCodexConfigChange = useCallback(
+    (next: CodexConfigResponse) => {
+      setCodexConfig(next);
+      if (!fileServerUrl) return;
+      setCodexStatus('loading');
+      void fetch(`${fileServerUrl}/codex/status`)
+        .then((response) => response.json())
+        .then((status) => {
+          setCodexStatus(status?.ok ? 'online' : 'offline');
+          setCodexDetectedPath(typeof status?.path === 'string' ? status.path : null);
+        })
+        .catch(() => setCodexStatus('offline'));
+    },
+    [fileServerUrl],
+  );
+
   const togglePicking = useCallback(() => {
     updateGlobals({ [KEY]: !isPicking });
   }, [updateGlobals, isPicking]);
+
+  const createSession = useCallback(() => {
+    const id = uid();
+    const now = Date.now();
+    setActiveSessionId(id);
+    setSessionCreatedAt(now);
+    setCodexThreadId(null);
+    setMessages([]);
+    localStorage.setItem(ACTIVE_SESSION_KEY, id);
+  }, []);
+
+  const resumeThread = useCallback((threadId: string) => {
+    const normalized = threadId.trim();
+    if (!normalized) return;
+    const id = uid();
+    const now = Date.now();
+    setActiveSessionId(id);
+    setSessionCreatedAt(now);
+    setCodexThreadId(normalized);
+    setMessages([]);
+    localStorage.setItem(ACTIVE_SESSION_KEY, id);
+    setSettingsOpen(false);
+  }, []);
+
+  const openSession = useCallback(
+    async (id: string) => {
+      if (!fileServerUrl || streaming || id === activeSessionId) return;
+      const session = await loadCodexSession(fileServerUrl, id);
+      setActiveSessionId(session.id);
+      setSessionCreatedAt(session.createdAt);
+      setCodexThreadId(session.threadId);
+      setMessages(session.messages);
+      localStorage.setItem(ACTIVE_SESSION_KEY, session.id);
+    },
+    [activeSessionId, fileServerUrl, streaming],
+  );
+
+  useEffect(() => {
+    if (settings.provider !== 'codex' || !fileServerUrl || activeSessionId) return;
+    let cancelled = false;
+    void listCodexSessions(fileServerUrl)
+      .then(async (items) => {
+        if (cancelled) return;
+        setSessions(items);
+        const remembered = localStorage.getItem(ACTIVE_SESSION_KEY);
+        const target = items.find((item) => item.id === remembered) ?? items[0];
+        if (!target) {
+          createSession();
+          return;
+        }
+        const session = await loadCodexSession(fileServerUrl, target.id);
+        if (cancelled) return;
+        setActiveSessionId(session.id);
+        setSessionCreatedAt(session.createdAt);
+        setCodexThreadId(session.threadId);
+        setMessages(session.messages);
+      })
+      .catch(() => {
+        if (!cancelled) createSession();
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSessionId, createSession, fileServerUrl, settings.provider]);
+
+  useEffect(() => {
+    if (settings.provider !== 'codex' || !fileServerUrl || !activeSessionId) return;
+    const firstUserMessage = messages.find((message) => message.role === 'user')?.content.trim();
+    const session = {
+      id: activeSessionId,
+      threadId: codexThreadId,
+      title: firstUserMessage ? firstUserMessage.slice(0, 72) : 'New session',
+      createdAt: sessionCreatedAt,
+      updatedAt: Date.now(),
+      messages,
+    };
+    const timer = window.setTimeout(
+      () => {
+        void saveCodexSession(fileServerUrl, session)
+          .then(() => listCodexSessions(fileServerUrl))
+          .then(setSessions)
+          .catch(() => undefined);
+      },
+      streaming ? 700 : 150,
+    );
+    return () => window.clearTimeout(timer);
+  }, [activeSessionId, codexThreadId, fileServerUrl, messages, sessionCreatedAt, settings.provider, streaming]);
 
   const send = useCallback(
     async (rawText: string) => {
@@ -236,6 +350,28 @@ export const Panel: React.FC<PanelProps> = ({ active }) => {
         setMessages((current) =>
           current.map((message) => (message.id === assistantId ? { ...message, ...patch } : message)),
         );
+      const appendAssistantPart = (part: MessagePart) =>
+        setMessages((current) =>
+          current.map((message) =>
+            message.id === assistantId ? { ...message, parts: [...(message.parts ?? []), part] } : message,
+          ),
+        );
+      const updateAssistantTextPart = (id: string, content: string) =>
+        setMessages((current) =>
+          current.map((message) => {
+            if (message.id !== assistantId) return message;
+            const parts = message.parts ?? [];
+            const index = parts.findIndex((part) => part.id === id);
+            const nextPart: MessagePart = { id, type: 'text', content };
+            return {
+              ...message,
+              parts:
+                index < 0
+                  ? [...parts, nextPart]
+                  : parts.map((part, partIndex) => (partIndex === index ? nextPart : part)),
+            };
+          }),
+        );
 
       // Codex CLI provider: run `codex exec` through the addon's local server.
       if (settings.provider === 'codex') {
@@ -251,19 +387,23 @@ export const Panel: React.FC<PanelProps> = ({ active }) => {
             const handlers: CodexHandlers = {
               onText: (delta) => {
                 accumulated += delta;
+                appendAssistantPart({ id: uid(), type: 'text', content: delta });
                 updateAssistant({ content: accumulated });
               },
               onItem: (item) => {
+                let event: ToolEvent;
                 if (item.type.includes('command')) {
-                  toolEvents.push({ id: uid(), name: 'Запустил команду', detail: '', ok: item.status !== 'failed' });
+                  event = { id: uid(), name: 'Command', detail: summarizeItem(item), ok: item.status !== 'failed' };
                 } else {
-                  toolEvents.push({
+                  event = {
                     id: uid(),
                     name: item.type,
                     detail: summarizeItem(item),
                     ok: item.status !== 'failed',
-                  });
+                  };
                 }
+                toolEvents.push(event);
+                appendAssistantPart({ id: event.id, type: 'tool', tool: event });
                 updateAssistant({ tools: [...toolEvents] });
               },
               onError: (message) => {
@@ -282,13 +422,7 @@ export const Panel: React.FC<PanelProps> = ({ active }) => {
                   userContent: text,
                   attachments: nextAttachments,
                 }),
-                sandbox: settings.codexSandbox,
-                model: settings.codexModel,
-                sessionId: settings.codexSession ? (codexThreadId ?? '') : '',
-                skipGitCheck: settings.codexSkipGitCheck,
-                approveForMe: settings.codexApproveForMe,
-                keepSession: settings.codexSession,
-                codexPath: settings.codexPath,
+                sessionId: codexThreadId ?? '',
               },
               handlers,
               controller.signal,
@@ -361,6 +495,8 @@ export const Panel: React.FC<PanelProps> = ({ active }) => {
               : null;
 
             while (true) {
+              const textPartId = uid();
+              let roundContent = '';
               const result = await streamChatCompletionFull(
                 callSettings,
                 apiMessages,
@@ -368,12 +504,15 @@ export const Panel: React.FC<PanelProps> = ({ active }) => {
                 controller.signal,
                 (delta) => {
                   accumulated += delta;
+                  roundContent += delta;
+                  updateAssistantTextPart(textPartId, roundContent);
                   updateAssistant({ content: accumulated });
                 },
               );
               if (!result.toolCalls.length) {
                 if (!accumulated && result.content) {
                   accumulated = result.content;
+                  updateAssistantTextPart(textPartId, result.content);
                   updateAssistant({ content: accumulated });
                 }
                 break;
@@ -407,6 +546,11 @@ export const Panel: React.FC<PanelProps> = ({ active }) => {
                   name: call.function.name,
                   detail: execution.detail,
                   ok: execution.ok,
+                });
+                appendAssistantPart({
+                  id: call.id,
+                  type: 'tool',
+                  tool: events[events.length - 1],
                 });
                 apiMessages.push({
                   role: 'tool',
@@ -444,7 +588,7 @@ export const Panel: React.FC<PanelProps> = ({ active }) => {
               retriedWithoutImages = true;
               // Persist the discovery: turn the screenshots toggle off.
               handleSettingsChange({ ...settings, sendScreenshots: false });
-              updateAssistant({ content: '' });
+              updateAssistant({ content: '', parts: [] });
               continue;
             }
             updateAssistant({ error: message });
@@ -476,18 +620,48 @@ export const Panel: React.FC<PanelProps> = ({ active }) => {
 
   const clearChat = useCallback(() => {
     attachmentStore.clear();
-    setMessages([]);
-    setCodexThreadId(null);
-  }, []);
+    if (settings.provider === 'codex') createSession();
+    else setMessages([]);
+  }, [createSession, settings.provider]);
 
   return (
     <AddonPanel key="sb-llm-panel" active={active}>
       <div className="sb-llm">
         <div className="sb-llm-header">
-          <span className="sb-llm-title">LLM Chat</span>
+          <span className="sb-llm-title">Assistant</span>
           <span className="sb-llm-model" title={`${settings.baseURL} · ${settings.model}`}>
-            {settings.provider === 'codex' ? 'codex' : settings.model || 'no model configured'}
+            {settings.provider === 'codex'
+              ? codexConfig?.config?.model || 'Codex server config'
+              : settings.model || 'no model configured'}
           </span>
+          {settings.provider === 'codex' && (
+            <div className="sb-llm-session-controls">
+              <select
+                aria-label="Codex session"
+                value={activeSessionId ?? ''}
+                disabled={streaming}
+                onChange={(event) => void openSession(event.target.value)}
+              >
+                {activeSessionId && !sessions.some((session) => session.id === activeSessionId) && (
+                  <option value={activeSessionId}>New session</option>
+                )}
+                {sessions.map((session) => (
+                  <option key={session.id} value={session.id}>
+                    {session.title} · {new Date(session.updatedAt).toLocaleDateString()}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                className="sb-llm-icon-btn"
+                onClick={createSession}
+                disabled={streaming}
+                title="New session"
+              >
+                +
+              </button>
+            </div>
+          )}
           {settings.provider === 'codex' && (
             <span
               className={`sb-llm-status${codexStatus === 'online' ? '' : ' sb-llm-status-off'}`}
@@ -496,7 +670,7 @@ export const Panel: React.FC<PanelProps> = ({ active }) => {
               Codex: {codexStatus === 'online' ? 'ready' : codexStatus === 'loading' ? '…' : 'not found'}
             </span>
           )}
-          {settings.fileTools && (
+          {settings.provider === 'api' && settings.fileTools && (
             <span
               className={`sb-llm-status${fileServerUrl ? '' : ' sb-llm-status-off'}`}
               title={
@@ -508,7 +682,7 @@ export const Panel: React.FC<PanelProps> = ({ active }) => {
               Files: {fileServerUrl ? 'on' : 'off'}
             </span>
           )}
-          {settings.mcpBridge && (
+          {settings.provider === 'api' && settings.mcpBridge && (
             <span
               className={`sb-llm-status${mcpStatus === 'online' ? '' : ' sb-llm-status-off'}`}
               title="Storybook MCP bridge"
@@ -525,8 +699,8 @@ export const Panel: React.FC<PanelProps> = ({ active }) => {
           >
             Settings
           </button>
-          <button type="button" className="sb-llm-header-btn" title="Clear the chat" onClick={clearChat}>
-            Clear
+          <button type="button" className="sb-llm-header-btn" title="Start with an empty chat" onClick={clearChat}>
+            {settings.provider === 'codex' ? 'New' : 'Clear'}
           </button>
         </div>
 
@@ -546,15 +720,14 @@ export const Panel: React.FC<PanelProps> = ({ active }) => {
         <div className="sb-llm-messages" ref={listRef}>
           {messages.length === 0 && (
             <div className="sb-llm-empty">
-              <p>
-                Chat with an LLM about the current story. Pick an element of the story (the inspect button next to the
-                input, or the toolbar) to attach it to your next message.
-              </p>
+              <div className="sb-llm-empty-mark">✦</div>
+              <h3>Design with context</h3>
+              <p>Ask about the current story, attach a rendered element, or let the agent improve the project.</p>
               <p>
                 <button type="button" className="sb-llm-link" onClick={() => setSettingsOpen(true)}>
                   Open settings
                 </button>{' '}
-                to connect your OpenAI-compatible model (DeepSeek, OpenAI, Ollama, …).
+                {settings.provider === 'codex' ? 'to configure the Codex harness.' : 'to connect a model.'}
               </p>
             </div>
           )}
@@ -575,6 +748,10 @@ export const Panel: React.FC<PanelProps> = ({ active }) => {
           <SettingsModal
             settings={settings}
             codexDetectedPath={codexDetectedPath}
+            codexConfig={codexConfig}
+            fileServerUrl={fileServerUrl}
+            onCodexConfigChange={handleCodexConfigChange}
+            onResumeThread={resumeThread}
             onChange={handleSettingsChange}
             onClose={() => setSettingsOpen(false)}
           />

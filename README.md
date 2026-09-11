@@ -35,6 +35,7 @@ export default {
       options: {
         fileTools: true, // allow the model to read/write project files (default)
         fileServerPort: 6050, // local file server port (default; next ports are tried too)
+        codexConfigFile: '.storybook/codex.config.json', // server-side Codex config
       },
     },
   ],
@@ -65,7 +66,7 @@ npm run storybook
 Open the **LLM Chat** panel → **Settings**:
 
 - **API provider**: pick a preset (DeepSeek / OpenAI) or enter a custom base URL, paste the API key, choose the model, click **Test connection**.
-- **Codex CLI provider**: switch the provider toggle to Codex CLI, pick the sandbox mode (`workspace-write` to let it edit files), optionally set a model. Codex uses your existing `~/.codex` auth.
+- **Codex CLI provider**: switch the provider to Codex CLI. Its dedicated settings form reads and writes `.storybook/codex.config.json` on the Storybook server. Pick a model from the catalog supplied by the installed Codex CLI and then choose one of that model's supported thinking levels.
 
 ### 6. Chat
 
@@ -74,7 +75,7 @@ Click **Pick element** (panel header or toolbar), click any element of the story
 ## Features
 
 - Chat panel with streaming responses (SSE) and markdown rendering
-- **Two providers**: OpenAI-compatible API (streaming + tool calling + vision screenshots) and Codex CLI (full local agent: edits files itself, runs commands, resumes its session between messages)
+- **Two provider harnesses** with separate settings: OpenAI-compatible API (streaming + tool calling + vision screenshots) and Codex CLI (full local agent: edits files itself, runs commands, resumes saved sessions)
 - Element picker: click a rendered element of the story (Esc cancels) to add it to the chat context; snapshots include `outerHTML`, `innerText`, computed styles, bounding box, ARIA attributes and a PNG screenshot
 - **Tool calling** (API provider):
   - `update_story_args` — changes story props via Storybook controls
@@ -83,7 +84,8 @@ Click **Pick element** (panel header or toolbar), click any element of the story
   - Storybook MCP tools via the bridge
   - Every tool execution is shown in the chat
 - Automatic fallback for text-only models (DeepSeek, …): image attachments rejected → request re-sent with text/HTML context, screenshots toggle switched off
-- Settings stored in `localStorage`; API key is sent only to the configured base URL
+- API settings are stored in `localStorage`; Codex execution settings live in the server-side project config
+- Server-persisted Codex chat history, new-session action, and a session picker for resuming any saved addon session
 - Stop button (AbortController) to cancel in-flight requests
 
 ## Usage tips
@@ -95,16 +97,34 @@ Click **Pick element** (panel header or toolbar), click any element of the story
 
 ## Codex CLI provider
 
-Pick **Codex CLI** in Settings → Provider. The panel talks to the addon's local server, which spawns `codex exec --json` in the project directory and streams events (agent messages, command executions, file changes) into the chat.
+Pick **Codex CLI** in Settings → Provider. The panel talks to the addon's local server, which spawns `codex exec --json` in the project directory and streams events (agent messages, command executions, file changes) into the chat in their original order.
 
-| Setting | Description |
-| --- | --- |
-| Codex binary path | Default `codex` (from PATH); set an absolute path to override |
-| Sandbox mode | `read-only` (chat only), `workspace-write` (edit project files, default), `danger-full-access` |
-| Model | Empty = codex default; e.g. `gpt-5.2-codex` |
-| Keep one session | Resume the same codex thread across messages (memory); cleared by **Clear** |
-| Auto-approve commands | `--approve-for-me` (workspace-write sandbox) |
-| Skip git-repo check | `--skip-git-repo-check` for projects outside a git repository |
+Codex requires a server-side config file. The default location is `.storybook/codex.config.json`; the settings panel creates and updates it:
+
+```json
+{
+  "model": "gpt-6-astra",
+  "reasoningEffort": "medium",
+  "sandbox": "workspace-write",
+  "codexPath": "codex",
+  "approveForMe": true,
+  "skipGitRepoCheck": false,
+  "config": {}
+}
+```
+
+The model list is not bundled into the addon. The server reads the model catalog maintained by the installed Codex CLI (`~/.codex/models_cache.json`), including each model's supported reasoning efforts. Extra Codex config overrides can be stored in the `config` object using dotted keys.
+
+| Server setting        | Description                                                                                    |
+| --------------------- | ---------------------------------------------------------------------------------------------- |
+| Codex binary path     | Default `codex` (from PATH); set an absolute path to override                                  |
+| Sandbox mode          | `read-only` (chat only), `workspace-write` (edit project files, default), `danger-full-access` |
+| Model                 | Selected from the installed Codex model catalog; empty means the Codex default                 |
+| Thinking level        | Dynamically limited to the levels supported by the selected model                              |
+| Auto-approve commands | `--approve-for-me` (workspace-write sandbox)                                                   |
+| Skip git-repo check   | `--skip-git-repo-check` for projects outside a git repository                                  |
+
+Chat transcripts and Codex thread IDs are persisted per project under `~/.codex/storybook-addon-llm/`. **New** starts a fresh thread; the session picker restores both the transcript and the matching Codex thread. The Codex settings also accept any existing Codex session UUID or thread name, including sessions created outside Storybook.
 
 To give codex access to your Storybook docs, register the MCP endpoint in `~/.codex/config.toml`:
 
@@ -115,20 +135,20 @@ url = "http://localhost:6006/mcp"
 
 ## Project editing
 
-The addon's preset starts a local HTTP server (`127.0.0.1:6050` by default) that provides `list`/`read`/`write` file access restricted to the project root (no traversal outside). The API provider gets `list_project_files`, `read_project_file` and `write_project_file` tools; writes are saved to disk and hot-reloaded by Storybook. The Codex provider edits files with its own tools.
+The addon's preset starts a local HTTP server (`127.0.0.1:6050` by default) that provides `list`/`read`/`write` file access restricted to the project root (no traversal outside). It also owns Codex configuration, model discovery and session persistence. The API provider gets `list_project_files`, `read_project_file` and `write_project_file` tools; writes are saved to disk and hot-reloaded by Storybook. The Codex provider edits files with its own tools.
 
 ## Configuration
 
-| Setting | Description |
-| --- | --- |
-| Provider | OpenAI-compatible API or Codex CLI |
-| Base URL | e.g. `https://api.deepseek.com`, `https://api.openai.com/v1`, `http://localhost:11434/v1` (Ollama) |
-| API key | Stored in `localStorage` only |
-| Model | e.g. `deepseek-chat`, `gpt-4o`, `llama3.1` |
-| Send element screenshots | Include PNG screenshots for vision models |
-| Project editing / file server port | Allow the model to read/write project files |
-| Storybook MCP bridge / MCP URL | Expose Storybook MCP tools; empty URL = current origin `/mcp` |
-| System prompt | Editable system prompt |
+| Setting                            | Description                                                                                        |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------- |
+| Provider                           | OpenAI-compatible API or Codex CLI                                                                 |
+| Base URL                           | e.g. `https://api.deepseek.com`, `https://api.openai.com/v1`, `http://localhost:11434/v1` (Ollama) |
+| API key                            | Stored in `localStorage` only                                                                      |
+| Model                              | e.g. `deepseek-chat`, `gpt-4o`, `llama3.1`                                                         |
+| Send element screenshots           | Include PNG screenshots for vision models                                                          |
+| Project editing / file server port | Allow the model to read/write project files                                                        |
+| Storybook MCP bridge / MCP URL     | Expose Storybook MCP tools; empty URL = current origin `/mcp`                                      |
+| System prompt                      | Editable system prompt                                                                             |
 
 ## Security
 

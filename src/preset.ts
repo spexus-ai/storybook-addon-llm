@@ -1,5 +1,6 @@
 import { createServer, type Server } from 'node:http';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -12,6 +13,8 @@ export interface FileServerOptions {
   fileServerPort?: number;
   /** Project root for file access. Default: process.cwd(). */
   fileRoot?: string;
+  /** Server-side Codex configuration. Default: .storybook/codex.config.json. */
+  codexConfigFile?: string;
 }
 
 const DEFAULT_PORT = 6050;
@@ -37,7 +40,7 @@ export function resolveProjectPath(root: string, input: string): string | null {
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, OPTIONS',
   'Access-Control-Allow-Headers': 'content-type, x-codex-path',
 };
 
@@ -71,8 +74,12 @@ async function readBody(req: import('node:http').IncomingMessage): Promise<Recor
 async function createFileServer(options: FileServerOptions): Promise<FileServerState | null> {
   const root = path.resolve(options.fileRoot ?? process.cwd());
   const basePort = options.fileServerPort ?? DEFAULT_PORT;
+  const configPath = path.resolve(root, options.codexConfigFile ?? '.storybook/codex.config.json');
+  const projectKey = createHash('sha256').update(root).digest('hex').slice(0, 16);
+  const sessionStorePath = path.join(os.homedir(), '.codex', 'storybook-addon-llm', `${projectKey}.json`);
   let codexVersion: string | null = null;
   const codexCache = new Map<string, string | null>();
+  let sessionWriteChain: Promise<void> = Promise.resolve();
 
   const isExecutable = async (candidate: string): Promise<boolean> => {
     try {
@@ -150,6 +157,111 @@ async function createFileServer(options: FileServerOptions): Promise<FileServerS
     ...CORS_HEADERS,
   };
 
+  type CodexConfig = {
+    model: string;
+    reasoningEffort: string;
+    sandbox: 'read-only' | 'workspace-write' | 'danger-full-access';
+    profile?: string;
+    codexPath: string;
+    approveForMe: boolean;
+    skipGitRepoCheck: boolean;
+    config: Record<string, string | number | boolean | string[]>;
+  };
+
+  const loadCodexConfig = async (): Promise<CodexConfig> => {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await fs.readFile(configPath, 'utf8'));
+    } catch (error) {
+      const code = error instanceof Error && 'code' in error ? (error as NodeJS.ErrnoException).code : undefined;
+      if (code === 'ENOENT') {
+        throw new Error(`Codex server config not found: ${path.relative(root, configPath)}`);
+      }
+      throw new Error(`Could not read Codex server config: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('Codex server config must be a JSON object');
+    }
+    const value = parsed as Record<string, unknown>;
+    const sandbox = value.sandbox;
+    if (sandbox !== 'read-only' && sandbox !== 'workspace-write' && sandbox !== 'danger-full-access') {
+      throw new Error('Codex server config `sandbox` must be read-only, workspace-write, or danger-full-access');
+    }
+    const extra = value.config;
+    const config: CodexConfig['config'] = {};
+    if (extra !== undefined) {
+      if (!extra || typeof extra !== 'object' || Array.isArray(extra)) {
+        throw new Error('Codex server config `config` must be an object');
+      }
+      for (const [key, item] of Object.entries(extra)) {
+        if (!/^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/.test(key)) {
+          throw new Error(`Invalid Codex config key: ${key}`);
+        }
+        if (
+          typeof item !== 'string' &&
+          typeof item !== 'number' &&
+          typeof item !== 'boolean' &&
+          !(Array.isArray(item) && item.every((entry) => typeof entry === 'string'))
+        ) {
+          throw new Error(`Unsupported value for Codex config key: ${key}`);
+        }
+        config[key] = item;
+      }
+    }
+    return {
+      model: typeof value.model === 'string' ? value.model.trim() : '',
+      reasoningEffort: typeof value.reasoningEffort === 'string' ? value.reasoningEffort.trim() : '',
+      sandbox,
+      profile: typeof value.profile === 'string' && value.profile.trim() ? value.profile.trim() : undefined,
+      codexPath: typeof value.codexPath === 'string' && value.codexPath.trim() ? value.codexPath.trim() : 'codex',
+      approveForMe: value.approveForMe === true,
+      skipGitRepoCheck: value.skipGitRepoCheck === true,
+      config,
+    };
+  };
+
+  type StoredSession = {
+    id: string;
+    threadId: string | null;
+    title: string;
+    createdAt: number;
+    updatedAt: number;
+    messages: unknown[];
+  };
+
+  const readSessions = async (): Promise<StoredSession[]> => {
+    try {
+      const parsed: unknown = JSON.parse(await fs.readFile(sessionStorePath, 'utf8'));
+      return Array.isArray(parsed) ? (parsed as StoredSession[]) : [];
+    } catch (error) {
+      const code = error instanceof Error && 'code' in error ? (error as NodeJS.ErrnoException).code : undefined;
+      if (code === 'ENOENT') return [];
+      throw error;
+    }
+  };
+
+  const writeSessions = async (sessions: StoredSession[]): Promise<void> => {
+    await fs.mkdir(path.dirname(sessionStorePath), { recursive: true });
+    const tempPath = `${sessionStorePath}.${process.pid}.tmp`;
+    await fs.writeFile(tempPath, JSON.stringify(sessions, null, 2), 'utf8');
+    await fs.rename(tempPath, sessionStorePath);
+  };
+
+  const upsertSession = async (session: StoredSession): Promise<void> => {
+    const write = sessionWriteChain.then(async () => {
+      const sessions = await readSessions();
+      await writeSessions([...sessions.filter((item) => item.id !== session.id), session]);
+    });
+    sessionWriteChain = write.catch(() => undefined);
+    await write;
+  };
+
+  const configLiteral = (value: string | number | boolean | string[]): string => {
+    if (typeof value === 'string') return JSON.stringify(value);
+    if (Array.isArray(value)) return `[${value.map((item) => JSON.stringify(item)).join(',')}]`;
+    return String(value);
+  };
+
   const writeEvent = (res: import('node:http').ServerResponse, payload: unknown) => {
     res.write(`data: ${JSON.stringify(payload)}\n\n`);
   };
@@ -218,12 +330,25 @@ async function createFileServer(options: FileServerOptions): Promise<FileServerS
     const url = new URL(req.url ?? '/', 'http://localhost');
 
     if (req.method === 'GET' && url.pathname === '/health') {
-      sendJson(res, 200, { ok: true, service: 'storybook-addon-llm', root, port: basePort });
+      sendJson(res, 200, {
+        ok: true,
+        service: 'storybook-addon-llm',
+        root,
+        port: basePort,
+        capabilities: ['files', 'codex-config', 'codex-models', 'codex-sessions'],
+      });
       return;
     }
 
     if (req.method === 'GET' && url.pathname === '/codex/status') {
-      const preferred = String(req.headers['x-codex-path'] ?? 'codex');
+      let serverConfig: CodexConfig;
+      try {
+        serverConfig = await loadCodexConfig();
+      } catch (error) {
+        sendJson(res, 200, { ok: false, configured: false, path: configPath, error: (error as Error).message });
+        return;
+      }
+      const preferred = serverConfig.codexPath;
       const resolved = await resolveCodex(preferred);
       if (!resolved) {
         sendJson(res, 200, {
@@ -253,13 +378,90 @@ async function createFileServer(options: FileServerOptions): Promise<FileServerS
       }
       sendJson(res, 200, {
         ok: true,
+        configured: true,
         version: codexVersion,
         path: resolved,
       });
       return;
     }
 
-    if (req.method !== 'POST') {
+    if (req.method === 'GET' && url.pathname === '/codex/config') {
+      try {
+        const config = await loadCodexConfig();
+        sendJson(res, 200, { ok: true, configured: true, path: configPath, config });
+      } catch (error) {
+        sendJson(res, 200, {
+          ok: false,
+          configured: false,
+          path: configPath,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/codex/models') {
+      const cachePath = path.join(os.homedir(), '.codex', 'models_cache.json');
+      try {
+        const cache = JSON.parse(await fs.readFile(cachePath, 'utf8')) as Record<string, unknown>;
+        const models = Array.isArray(cache.models)
+          ? cache.models
+              .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object')
+              .filter((item) => item.visibility !== 'hide')
+              .map((item) => ({
+                id: String(item.slug ?? ''),
+                name: String(item.display_name ?? item.slug ?? ''),
+                description: typeof item.description === 'string' ? item.description : '',
+                defaultReasoningEffort:
+                  typeof item.default_reasoning_level === 'string' ? item.default_reasoning_level : '',
+                reasoningEfforts: Array.isArray(item.supported_reasoning_levels)
+                  ? item.supported_reasoning_levels
+                      .filter((level): level is Record<string, unknown> => !!level && typeof level === 'object')
+                      .map((level) => ({
+                        id: String(level.effort ?? ''),
+                        description: typeof level.description === 'string' ? level.description : '',
+                      }))
+                      .filter((level) => level.id)
+                  : [],
+              }))
+              .filter((item) => item.id)
+          : [];
+        sendJson(res, 200, {
+          models,
+          fetchedAt: typeof cache.fetched_at === 'string' ? cache.fetched_at : null,
+          source: cachePath,
+        });
+      } catch (error) {
+        sendJson(res, 200, {
+          models: [],
+          fetchedAt: null,
+          source: cachePath,
+          error: `Codex model catalog is unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/codex/sessions') {
+      const sessions = (await readSessions())
+        .map(({ messages, ...session }) => ({ ...session, messageCount: messages.length }))
+        .sort((a, b) => b.updatedAt - a.updatedAt);
+      sendJson(res, 200, { sessions });
+      return;
+    }
+
+    if (req.method === 'GET' && url.pathname.startsWith('/codex/sessions/')) {
+      const id = decodeURIComponent(url.pathname.slice('/codex/sessions/'.length));
+      const session = (await readSessions()).find((item) => item.id === id);
+      if (!session) {
+        sendJson(res, 404, { error: 'Session not found' });
+      } else {
+        sendJson(res, 200, session);
+      }
+      return;
+    }
+
+    if (req.method !== 'POST' && req.method !== 'PUT') {
       sendJson(res, 405, { ok: false, error: 'Method not allowed' });
       return;
     }
@@ -272,36 +474,92 @@ async function createFileServer(options: FileServerOptions): Promise<FileServerS
       return;
     }
 
+    if (req.method === 'PUT' && url.pathname.startsWith('/codex/sessions/')) {
+      const id = decodeURIComponent(url.pathname.slice('/codex/sessions/'.length));
+      if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) {
+        sendJson(res, 400, { error: 'Invalid session id' });
+        return;
+      }
+      if (!Array.isArray(body.messages)) {
+        sendJson(res, 400, { error: '`messages` must be an array' });
+        return;
+      }
+      const now = Date.now();
+      const previous = (await readSessions()).find((item) => item.id === id);
+      const session: StoredSession = {
+        id,
+        threadId: typeof body.threadId === 'string' && body.threadId ? body.threadId : null,
+        title: typeof body.title === 'string' && body.title.trim() ? body.title.trim().slice(0, 120) : 'New session',
+        createdAt: typeof body.createdAt === 'number' ? body.createdAt : (previous?.createdAt ?? now),
+        updatedAt: typeof body.updatedAt === 'number' ? body.updatedAt : now,
+        messages: body.messages,
+      };
+      await upsertSession(session);
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    if (req.method === 'PUT' && url.pathname === '/codex/config') {
+      if (body.sandbox !== 'read-only' && body.sandbox !== 'workspace-write' && body.sandbox !== 'danger-full-access') {
+        sendJson(res, 400, { ok: false, error: 'Invalid sandbox mode' });
+        return;
+      }
+      const nextConfig = {
+        model: typeof body.model === 'string' ? body.model : '',
+        reasoningEffort: typeof body.reasoningEffort === 'string' ? body.reasoningEffort : '',
+        sandbox: body.sandbox,
+        profile: typeof body.profile === 'string' ? body.profile : '',
+        codexPath: typeof body.codexPath === 'string' ? body.codexPath : 'codex',
+        approveForMe: body.approveForMe === true,
+        skipGitRepoCheck: body.skipGitRepoCheck === true,
+        config: body.config && typeof body.config === 'object' && !Array.isArray(body.config) ? body.config : {},
+      };
+      try {
+        await fs.mkdir(path.dirname(configPath), { recursive: true });
+        const tempPath = `${configPath}.${process.pid}.tmp`;
+        await fs.writeFile(tempPath, JSON.stringify(nextConfig, null, 2) + '\n', 'utf8');
+        await fs.rename(tempPath, configPath);
+        const config = await loadCodexConfig();
+        sendJson(res, 200, { ok: true, configured: true, path: configPath, config });
+      } catch (error) {
+        sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) });
+      }
+      return;
+    }
+
     if (url.pathname === '/codex/run') {
       const prompt = typeof body.prompt === 'string' ? body.prompt : '';
       if (!prompt.trim()) {
         sendJson(res, 400, { ok: false, error: '`prompt` is required' });
         return;
       }
-      const codexPath = typeof body.codexPath === 'string' && body.codexPath.trim() ? body.codexPath.trim() : 'codex';
-      const resolvedCodex = await resolveCodex(codexPath);
+      let serverConfig: CodexConfig;
+      try {
+        serverConfig = await loadCodexConfig();
+      } catch (error) {
+        sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) });
+        return;
+      }
+      const resolvedCodex = await resolveCodex(serverConfig.codexPath);
       if (!resolvedCodex) {
         sendJson(res, 400, {
           ok: false,
-          error:
-            'codex binary not found on PATH or in common install locations — set the full path in Settings (Codex binary path)',
+          error: `codex binary not found; configure codexPath in ${path.relative(root, configPath)}`,
         });
         return;
       }
-      const sandbox =
-        body.sandbox === 'read-only' || body.sandbox === 'workspace-write' || body.sandbox === 'danger-full-access'
-          ? body.sandbox
-          : 'workspace-write';
-      const model = typeof body.model === 'string' ? body.model.trim() : '';
+      const { sandbox, model, reasoningEffort, approveForMe, skipGitRepoCheck } = serverConfig;
       const sessionId = typeof body.sessionId === 'string' ? body.sessionId.trim() : '';
-      const skipGitCheck = body.skipGitCheck === true;
       // --approve-for-me implies the workspace-write sandbox; codex rejects the
       // combination with an explicit --sandbox flag.
-      const approveForMe = body.approveForMe === true && sandbox === 'workspace-write';
       const explicitSandbox = sandbox === 'read-only' || sandbox === 'danger-full-access';
-      const keepSession = body.keepSession === true;
 
       const args = ['exec'];
+      if (serverConfig.profile) args.push('--profile', serverConfig.profile);
+      for (const [key, value] of Object.entries(serverConfig.config)) {
+        args.push('--config', `${key}=${configLiteral(value)}`);
+      }
+      if (reasoningEffort) args.push('--config', `model_reasoning_effort=${configLiteral(reasoningEffort)}`);
       if (sessionId) {
         // The resume subcommand supports a smaller flag set: sandbox, -C and
         // approvals are inherited from the original session.
@@ -310,22 +568,19 @@ async function createFileServer(options: FileServerOptions): Promise<FileServerS
         if (model) {
           args.push('--model', model);
         }
-        if (skipGitCheck) {
+        if (skipGitRepoCheck) {
           args.push('--skip-git-repo-check');
         }
         args.push('--', prompt);
       } else {
         args.push('--json', '--color', 'never');
-        if (!keepSession) {
-          args.push('--ephemeral');
-        }
         if (explicitSandbox) {
           args.push('--sandbox', sandbox);
         }
-        if (approveForMe) {
+        if (approveForMe && sandbox === 'workspace-write') {
           args.push('--approve-for-me');
         }
-        if (skipGitCheck) {
+        if (skipGitRepoCheck) {
           args.push('--skip-git-repo-check');
         }
         if (model) {

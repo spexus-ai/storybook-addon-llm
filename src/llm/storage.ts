@@ -20,12 +20,6 @@ export const DEFAULT_SETTINGS: LLMSettings = {
   mcpBridge: true,
   mcpUrl: '',
   provider: 'api',
-  codexPath: 'codex',
-  codexSandbox: 'workspace-write',
-  codexModel: '',
-  codexSession: true,
-  codexSkipGitCheck: false,
-  codexApproveForMe: true,
 };
 
 export function loadSettings(): LLMSettings {

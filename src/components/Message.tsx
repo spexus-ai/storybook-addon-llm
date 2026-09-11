@@ -1,7 +1,20 @@
 import React, { memo, useMemo } from 'react';
 
 import { renderMarkdown } from '../markdown';
-import type { ChatMessage } from '../types';
+import type { ChatMessage, ToolEvent } from '../types';
+
+function ToolActivity({ tool }: { tool: ToolEvent }) {
+  return (
+    <details className={`sb-llm-msg-tool${tool.ok ? '' : ' sb-llm-msg-tool-fail'}`}>
+      <summary>
+        <span className="sb-llm-msg-tool-chevron" aria-hidden="true" />
+        <code className="sb-llm-msg-tool-name">{tool.name}</code>
+        <span className="sb-llm-msg-tool-status">{tool.ok ? 'Done' : 'Failed'}</span>
+      </summary>
+      {tool.detail && <pre className="sb-llm-msg-tool-detail">{tool.detail}</pre>}
+    </details>
+  );
+}
 
 export const Message = memo(function Message({ message }: { message: ChatMessage }) {
   const isUser = message.role === 'user';
@@ -34,20 +47,29 @@ export const Message = memo(function Message({ message }: { message: ChatMessage
         </div>
       )}
 
-      {message.tools && message.tools.length > 0 && (
+      {!message.parts && message.tools && message.tools.length > 0 && (
         <div className="sb-llm-msg-tools">
           {message.tools.map((tool) => (
-            <div key={tool.id} className={`sb-llm-msg-tool${tool.ok ? '' : ' sb-llm-msg-tool-fail'}`}>
-              <code className="sb-llm-msg-tool-name">{tool.name}</code>
-              <span className="sb-llm-msg-tool-detail">{tool.detail}</span>
-            </div>
+            <ToolActivity key={tool.id} tool={tool} />
           ))}
         </div>
       )}
 
-      {renderedContent ? (
+      {message.parts?.map((part) =>
+        part.type === 'tool' ? (
+          <ToolActivity key={part.id} tool={part.tool} />
+        ) : (
+          <div
+            key={part.id}
+            className="sb-llm-msg-content"
+            dangerouslySetInnerHTML={{ __html: renderMarkdown(part.content) }}
+          />
+        ),
+      )}
+
+      {!message.parts && renderedContent ? (
         <div className="sb-llm-msg-content" dangerouslySetInnerHTML={{ __html: renderedContent }} />
-      ) : !message.error && !(message.tools && message.tools.length > 0) ? (
+      ) : !message.error && !message.parts?.length && !(message.tools && message.tools.length > 0) ? (
         <div className="sb-llm-msg-pending">Thinking…</div>
       ) : null}
 

@@ -1,13 +1,18 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 
 import { testConnection, type ConnectionTestResult } from '../llm/client';
-import type { LLMSettings } from '../types';
+import { getCodexModels, saveCodexConfig, type CodexConfigResponse, type CodexModelInfo } from '../llm/codexClient';
+import type { CodexServerConfig, LLMSettings } from '../types';
 
 interface SettingsModalProps {
   settings: LLMSettings;
   onChange: (settings: LLMSettings) => void;
   onClose: () => void;
   codexDetectedPath?: string | null;
+  codexConfig: CodexConfigResponse | null;
+  fileServerUrl: string | null;
+  onCodexConfigChange: (config: CodexConfigResponse) => void;
+  onResumeThread: (threadId: string) => void;
 }
 
 const PRESETS: Array<{ name: string; baseURL: string; model: string }> = [
@@ -16,9 +21,68 @@ const PRESETS: Array<{ name: string; baseURL: string; model: string }> = [
   { name: 'Custom', baseURL: '', model: '' },
 ];
 
-export const SettingsModal: React.FC<SettingsModalProps> = ({ settings, onChange, onClose, codexDetectedPath }) => {
+const DEFAULT_CODEX_CONFIG: CodexServerConfig = {
+  model: '',
+  reasoningEffort: '',
+  sandbox: 'workspace-write',
+  codexPath: 'codex',
+  approveForMe: true,
+  skipGitRepoCheck: false,
+  config: {},
+};
+
+export const SettingsModal: React.FC<SettingsModalProps> = ({
+  settings,
+  onChange,
+  onClose,
+  codexDetectedPath,
+  codexConfig,
+  fileServerUrl,
+  onCodexConfigChange,
+  onResumeThread,
+}) => {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<ConnectionTestResult | null>(null);
+  const [codexDraft, setCodexDraft] = useState<CodexServerConfig>(() => codexConfig?.config ?? DEFAULT_CODEX_CONFIG);
+  const [codexModels, setCodexModels] = useState<CodexModelInfo[]>([]);
+  const [savingCodex, setSavingCodex] = useState(false);
+  const [codexResult, setCodexResult] = useState<ConnectionTestResult | null>(null);
+  const [resumeThreadId, setResumeThreadId] = useState('');
+
+  useEffect(() => {
+    if (codexConfig?.config) setCodexDraft(codexConfig.config);
+  }, [codexConfig]);
+
+  useEffect(() => {
+    if (!fileServerUrl || settings.provider !== 'codex') return;
+    void getCodexModels(fileServerUrl)
+      .then((result) => setCodexModels(result.models))
+      .catch(() => setCodexModels([]));
+  }, [fileServerUrl, settings.provider]);
+
+  const selectedCodexModel = useMemo(
+    () => codexModels.find((model) => model.id === codexDraft.model),
+    [codexDraft.model, codexModels],
+  );
+
+  const setCodex = <K extends keyof CodexServerConfig>(key: K, value: CodexServerConfig[K]) => {
+    setCodexDraft((current) => ({ ...current, [key]: value }));
+  };
+
+  const persistCodexConfig = async () => {
+    if (!fileServerUrl) return;
+    setSavingCodex(true);
+    setCodexResult(null);
+    try {
+      const result = await saveCodexConfig(fileServerUrl, codexDraft);
+      onCodexConfigChange(result);
+      setCodexResult({ ok: true, message: `Saved to ${result.path}` });
+    } catch (error) {
+      setCodexResult({ ok: false, message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setSavingCodex(false);
+    }
+  };
 
   const set = <K extends keyof LLMSettings>(key: K, value: LLMSettings[K]) => {
     onChange({ ...settings, [key]: value });
@@ -39,7 +103,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ settings, onChange
   return (
     <div className="sb-llm-modal-overlay" onClick={onClose}>
       <div className="sb-llm-modal" onClick={(event) => event.stopPropagation()}>
-        <h3 className="sb-llm-modal-title">LLM connection</h3>
+        <h3 className="sb-llm-modal-title">Harness settings</h3>
 
         <div className="sb-llm-modal-field">
           <span className="sb-llm-modal-label">Provider</span>
@@ -54,7 +118,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ settings, onChange
             <button
               type="button"
               className={`sb-llm-header-btn${settings.provider === 'codex' ? ' sb-llm-header-btn-active' : ''}`}
-              onClick={() => onChange({ ...settings, provider: 'codex' })}
+              onClick={() => onChange({ ...settings, provider: 'codex', fileTools: true })}
             >
               Codex CLI
             </button>
@@ -126,12 +190,69 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ settings, onChange
 
         {settings.provider === 'codex' && (
           <div className="sb-llm-provider-section">
+            <div className="sb-llm-config-card">
+              <div>
+                <strong>Server configuration</strong>
+                <div className="sb-llm-modal-hint">{codexConfig?.path ?? '.storybook/codex.config.json'}</div>
+              </div>
+              <span className={`sb-llm-config-badge${codexConfig?.configured ? '' : ' sb-llm-config-badge-warn'}`}>
+                {codexConfig?.configured ? 'Configured' : 'Setup required'}
+              </span>
+            </div>
+
             <label className="sb-llm-modal-field">
-              <span className="sb-llm-modal-label">Codex binary path (default: codex from PATH)</span>
+              <span className="sb-llm-modal-label">Model</span>
+              <select
+                value={codexDraft.model}
+                onChange={(event) => {
+                  const model = codexModels.find((item) => item.id === event.target.value);
+                  setCodexDraft((current) => ({
+                    ...current,
+                    model: event.target.value,
+                    reasoningEffort: model?.defaultReasoningEffort ?? '',
+                  }));
+                }}
+              >
+                <option value="">Codex default</option>
+                {codexModels.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.name}
+                  </option>
+                ))}
+                {codexDraft.model && !codexModels.some((model) => model.id === codexDraft.model) && (
+                  <option value={codexDraft.model}>{codexDraft.model}</option>
+                )}
+              </select>
+              {selectedCodexModel?.description && (
+                <span className="sb-llm-modal-hint">{selectedCodexModel.description}</span>
+              )}
+              {!codexModels.length && (
+                <span className="sb-llm-modal-hint">The installed Codex model catalog is not available yet.</span>
+              )}
+            </label>
+
+            <label className="sb-llm-modal-field">
+              <span className="sb-llm-modal-label">Thinking level</span>
+              <select
+                value={codexDraft.reasoningEffort}
+                onChange={(event) => setCodex('reasoningEffort', event.target.value)}
+                disabled={!selectedCodexModel?.reasoningEfforts.length}
+              >
+                <option value="">Model default</option>
+                {selectedCodexModel?.reasoningEfforts.map((effort) => (
+                  <option key={effort.id} value={effort.id}>
+                    {effort.id} — {effort.description}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="sb-llm-modal-field">
+              <span className="sb-llm-modal-label">Codex binary</span>
               <input
                 type="text"
-                value={settings.codexPath}
-                onChange={(event) => set('codexPath', event.target.value)}
+                value={codexDraft.codexPath}
+                onChange={(event) => setCodex('codexPath', event.target.value)}
                 placeholder="codex"
               />
               {codexDetectedPath && <span className="sb-llm-modal-hint">Detected: {codexDetectedPath}</span>}
@@ -140,10 +261,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ settings, onChange
             <label className="sb-llm-modal-field">
               <span className="sb-llm-modal-label">Sandbox mode</span>
               <select
-                value={settings.codexSandbox}
-                onChange={(event) =>
-                  set('codexSandbox', event.target.value as 'read-only' | 'workspace-write' | 'danger-full-access')
-                }
+                value={codexDraft.sandbox}
+                onChange={(event) => setCodex('sandbox', event.target.value as CodexServerConfig['sandbox'])}
               >
                 <option value="read-only">read-only (chat only)</option>
                 <option value="workspace-write">workspace-write (edit project files)</option>
@@ -151,30 +270,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ settings, onChange
               </select>
             </label>
 
-            <label className="sb-llm-modal-field">
-              <span className="sb-llm-modal-label">Model (empty = codex default)</span>
-              <input
-                type="text"
-                value={settings.codexModel}
-                onChange={(event) => set('codexModel', event.target.value)}
-                placeholder="e.g. gpt-5.2-codex"
-              />
-            </label>
-
             <label className="sb-llm-modal-field sb-llm-modal-checkbox">
               <input
                 type="checkbox"
-                checked={settings.codexSession}
-                onChange={(event) => set('codexSession', event.target.checked)}
-              />
-              <span>Keep one codex session across chat messages (resume the conversation).</span>
-            </label>
-
-            <label className="sb-llm-modal-field sb-llm-modal-checkbox">
-              <input
-                type="checkbox"
-                checked={settings.codexApproveForMe}
-                onChange={(event) => set('codexApproveForMe', event.target.checked)}
+                checked={codexDraft.approveForMe}
+                onChange={(event) => setCodex('approveForMe', event.target.checked)}
               />
               <span>Auto-approve shell commands inside the workspace-write sandbox (--approve-for-me).</span>
             </label>
@@ -182,71 +282,113 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ settings, onChange
             <label className="sb-llm-modal-field sb-llm-modal-checkbox">
               <input
                 type="checkbox"
-                checked={settings.codexSkipGitCheck}
-                onChange={(event) => set('codexSkipGitCheck', event.target.checked)}
+                checked={codexDraft.skipGitRepoCheck}
+                onChange={(event) => setCodex('skipGitRepoCheck', event.target.checked)}
               />
               <span>Skip the git-repository check (--skip-git-repo-check).</span>
             </label>
+
+            <button
+              type="button"
+              className="sb-llm-primary-btn"
+              onClick={() => void persistCodexConfig()}
+              disabled={savingCodex || !fileServerUrl}
+            >
+              {savingCodex ? 'Saving…' : 'Save server configuration'}
+            </button>
+            {codexResult && (
+              <div className={codexResult.ok ? 'sb-llm-test sb-llm-test-ok' : 'sb-llm-test sb-llm-test-fail'}>
+                {codexResult.message}
+              </div>
+            )}
+
+            <div className="sb-llm-resume-row">
+              <label className="sb-llm-modal-field">
+                <span className="sb-llm-modal-label">Resume Codex session by UUID or name</span>
+                <input
+                  type="text"
+                  value={resumeThreadId}
+                  onChange={(event) => setResumeThreadId(event.target.value)}
+                  placeholder="019… or thread name"
+                />
+              </label>
+              <button
+                type="button"
+                className="sb-llm-header-btn"
+                disabled={!resumeThreadId.trim()}
+                onClick={() => onResumeThread(resumeThreadId)}
+              >
+                Resume
+              </button>
+            </div>
           </div>
         )}
 
-        <h4 className="sb-llm-modal-subtitle">Project editing</h4>
+        {settings.provider === 'api' && <h4 className="sb-llm-modal-subtitle">Project editing</h4>}
 
-        <label className="sb-llm-modal-field sb-llm-modal-checkbox">
-          <input
-            type="checkbox"
-            checked={settings.fileTools}
-            onChange={(event) => set('fileTools', event.target.checked)}
-          />
-          <span>
-            Allow the model to read and write project source files (permanent changes, hot-reloaded in Storybook).
-            Requires the addon preset to be loaded in .storybook/main.
-          </span>
-        </label>
+        {settings.provider === 'api' && (
+          <label className="sb-llm-modal-field sb-llm-modal-checkbox">
+            <input
+              type="checkbox"
+              checked={settings.fileTools}
+              onChange={(event) => set('fileTools', event.target.checked)}
+            />
+            <span>
+              Allow the model to read and write project source files (permanent changes, hot-reloaded in Storybook).
+              Requires the addon preset to be loaded in .storybook/main.
+            </span>
+          </label>
+        )}
+
+        {settings.provider === 'api' && (
+          <label className="sb-llm-modal-field">
+            <span className="sb-llm-modal-label">File server port</span>
+            <input
+              type="text"
+              inputMode="numeric"
+              value={String(settings.fileServerPort)}
+              onChange={(event) => {
+                const port = Number.parseInt(event.target.value, 10);
+                if (Number.isFinite(port)) {
+                  set('fileServerPort', port);
+                } else {
+                  set('fileServerPort', 0);
+                }
+              }}
+            />
+          </label>
+        )}
+
+        {settings.provider === 'api' && <h4 className="sb-llm-modal-subtitle">Storybook MCP bridge</h4>}
+
+        {settings.provider === 'api' && (
+          <label className="sb-llm-modal-field sb-llm-modal-checkbox">
+            <input
+              type="checkbox"
+              checked={settings.mcpBridge}
+              onChange={(event) => set('mcpBridge', event.target.checked)}
+            />
+            <span>
+              Expose the Storybook MCP server tools (component docs, story instructions, tests, previews) to the model.
+              Requires @storybook/addon-mcp in .storybook/main and a running dev server.
+            </span>
+          </label>
+        )}
+
+        {settings.provider === 'api' && (
+          <label className="sb-llm-modal-field">
+            <span className="sb-llm-modal-label">MCP URL (empty = current origin /mcp)</span>
+            <input
+              type="text"
+              value={settings.mcpUrl}
+              onChange={(event) => set('mcpUrl', event.target.value)}
+              placeholder="http://localhost:6006/mcp"
+            />
+          </label>
+        )}
 
         <label className="sb-llm-modal-field">
-          <span className="sb-llm-modal-label">File server port</span>
-          <input
-            type="text"
-            inputMode="numeric"
-            value={String(settings.fileServerPort)}
-            onChange={(event) => {
-              const port = Number.parseInt(event.target.value, 10);
-              if (Number.isFinite(port)) {
-                set('fileServerPort', port);
-              } else {
-                set('fileServerPort', 0);
-              }
-            }}
-          />
-        </label>
-
-        <h4 className="sb-llm-modal-subtitle">Storybook MCP bridge</h4>
-
-        <label className="sb-llm-modal-field sb-llm-modal-checkbox">
-          <input
-            type="checkbox"
-            checked={settings.mcpBridge}
-            onChange={(event) => set('mcpBridge', event.target.checked)}
-          />
-          <span>
-            Expose the Storybook MCP server tools (component docs, story instructions, tests, previews) to the model.
-            Requires @storybook/addon-mcp in .storybook/main and a running dev server.
-          </span>
-        </label>
-
-        <label className="sb-llm-modal-field">
-          <span className="sb-llm-modal-label">MCP URL (empty = current origin /mcp)</span>
-          <input
-            type="text"
-            value={settings.mcpUrl}
-            onChange={(event) => set('mcpUrl', event.target.value)}
-            placeholder="http://localhost:6006/mcp"
-          />
-        </label>
-
-        <label className="sb-llm-modal-field">
-          <span className="sb-llm-modal-label">System prompt</span>
+          <span className="sb-llm-modal-label">Agent instructions</span>
           <textarea
             rows={5}
             value={settings.systemPrompt}

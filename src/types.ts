@@ -24,13 +24,9 @@ export interface LLMSettings {
   mcpUrl: string;
   /** 'api' = OpenAI-compatible HTTP API, 'codex' = local Codex CLI binary. */
   provider: 'api' | 'codex';
-  codexPath: string;
-  codexSandbox: 'read-only' | 'workspace-write' | 'danger-full-access';
-  codexModel: string;
-  codexSession: boolean;
-  codexSkipGitCheck: boolean;
-  codexApproveForMe: boolean;
 }
+
+export type MessagePart = { id: string; type: 'text'; content: string } | { id: string; type: 'tool'; tool: ToolEvent };
 
 export interface ChatMessage {
   id: string;
@@ -39,6 +35,30 @@ export interface ChatMessage {
   attachments?: ElementSnapshot[];
   error?: string;
   tools?: ToolEvent[];
+  /** Ordered response timeline. Used by agent providers whose tool calls and text interleave. */
+  parts?: MessagePart[];
+}
+
+export interface ChatSession {
+  id: string;
+  threadId: string | null;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  messages: ChatMessage[];
+}
+
+export type ChatSessionSummary = Omit<ChatSession, 'messages'> & { messageCount: number };
+
+export interface CodexServerConfig {
+  model: string;
+  reasoningEffort: string;
+  sandbox: 'read-only' | 'workspace-write' | 'danger-full-access';
+  profile?: string;
+  codexPath: string;
+  approveForMe: boolean;
+  skipGitRepoCheck: boolean;
+  config: Record<string, string | number | boolean | string[]>;
 }
 
 export interface ToolEvent {

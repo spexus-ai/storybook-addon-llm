@@ -4,7 +4,7 @@ export interface FileServerToolResult {
 }
 
 /** Probes the local file server on the base port and the next few ports. */
-export async function findFileServer(basePort: number): Promise<string | null> {
+export async function findFileServer(basePort: number, capability?: string): Promise<string | null> {
   const port = Math.max(1, Math.floor(basePort));
   for (let attempt = 0; attempt < 6; attempt += 1) {
     const origin = `http://127.0.0.1:${port + attempt}`;
@@ -17,7 +17,11 @@ export async function findFileServer(basePort: number): Promise<string | null> {
         const json = await response.json().catch(() => null);
         // Verify the responder is really the addon's server, not some other
         // local service that happens to listen on the same port.
-        if (json?.ok && json?.service === 'storybook-addon-llm') {
+        if (
+          json?.ok &&
+          json?.service === 'storybook-addon-llm' &&
+          (!capability || (Array.isArray(json.capabilities) && json.capabilities.includes(capability)))
+        ) {
           return origin;
         }
       }

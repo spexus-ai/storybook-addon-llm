@@ -4,13 +4,7 @@ export type CodexSandbox = 'read-only' | 'workspace-write' | 'danger-full-access
 
 export interface CodexRunParams {
   prompt: string;
-  sandbox: CodexSandbox;
-  model: string;
   sessionId: string;
-  skipGitCheck: boolean;
-  approveForMe: boolean;
-  keepSession: boolean;
-  codexPath: string;
 }
 
 export interface CodexItem {
@@ -218,3 +212,65 @@ export async function runCodex(
 }
 
 export { summarizeItem };
+
+async function requestJson<T>(serverUrl: string, path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(`${serverUrl}${path}`, init);
+  const json = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(typeof json?.error === 'string' ? json.error : `Request failed with status ${response.status}`);
+  }
+  return json as T;
+}
+
+export interface CodexConfigResponse {
+  ok: boolean;
+  configured: boolean;
+  path: string;
+  config?: import('../types').CodexServerConfig;
+  error?: string;
+}
+
+export interface CodexModelInfo {
+  id: string;
+  name: string;
+  description: string;
+  defaultReasoningEffort: string;
+  reasoningEfforts: Array<{ id: string; description: string }>;
+}
+
+export function getCodexConfig(serverUrl: string): Promise<CodexConfigResponse> {
+  return requestJson(serverUrl, '/codex/config');
+}
+
+export function getCodexModels(serverUrl: string): Promise<{ models: CodexModelInfo[]; fetchedAt: string | null }> {
+  return requestJson(serverUrl, '/codex/models');
+}
+
+export function saveCodexConfig(
+  serverUrl: string,
+  config: import('../types').CodexServerConfig,
+): Promise<CodexConfigResponse> {
+  return requestJson(serverUrl, '/codex/config', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
+  });
+}
+
+export function listCodexSessions(serverUrl: string): Promise<import('../types').ChatSessionSummary[]> {
+  return requestJson<{ sessions: import('../types').ChatSessionSummary[] }>(serverUrl, '/codex/sessions').then(
+    (result) => result.sessions,
+  );
+}
+
+export function loadCodexSession(serverUrl: string, id: string): Promise<import('../types').ChatSession> {
+  return requestJson(serverUrl, `/codex/sessions/${encodeURIComponent(id)}`);
+}
+
+export function saveCodexSession(serverUrl: string, session: import('../types').ChatSession): Promise<void> {
+  return requestJson(serverUrl, `/codex/sessions/${encodeURIComponent(session.id)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(session),
+  }).then(() => undefined);
+}
